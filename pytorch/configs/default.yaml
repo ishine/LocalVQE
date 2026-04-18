@@ -1,0 +1,18 @@
+# LocalVQE architecture config (learned-tiny variant, ~0.9M params)
+#
+# This file describes the model geometry used for the published checkpoints.
+# Only `model` and `audio` fields are consumed by the inference model;
+# training-side settings live in the (private) training repository.
+
+model:
+  mic_channels: [2, 32, 40, 40, 40, 40]
+  far_channels: [2, 32, 40]
+  align_hidden: 32
+  dmax: 32
+  power_law_c: 0.3
+  kernel_size: [4, 4]
+  bottleneck_hidden: 162
+
+audio:
+  sample_rate: 16000
+  n_freqs: 256

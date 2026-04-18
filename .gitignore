@@ -1,0 +1,22 @@
+# C++ build
+ggml/build/
+ggml/build-*/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Model weights (download from Hugging Face)
+*.gguf
+*.pt
+*.bin
+
+# Generated audio
+*.wav
+
+# Editors / tools
+.direnv/
+.claude/
+.cache/
