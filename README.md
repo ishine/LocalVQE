@@ -22,6 +22,23 @@ bottleneck for a diagonal state-space model (S4D), and is ~9× smaller than
 the reference DeepVQE. Everything specific to LocalVQE is original to this
 repository — there is no LocalVQE paper.
 
+## A concrete example
+
+Picture a video call from a laptop. Your microphone picks up three things
+alongside your voice:
+
+1. The remote participant's voice, played back through your speakers and
+   caught again by your mic — this is the **echo**. Without cancellation
+   they hear themselves a fraction of a second later.
+2. Your own voice bouncing off walls, desk, and monitor before reaching
+   the mic — this is **reverberation**, the "tunnel" or "bathroom" sound
+   that makes you feel far away from the listener.
+3. A fan, keyboard clatter, a dog barking, or traffic outside — plain
+   **background noise**.
+
+LocalVQE removes all three in a single causal pass, frame by frame, on
+the CPU, so only your voice reaches the far end.
+
 ## Why this, and not a classical AEC/NS stack?
 
 Hand-tuned DSP pipelines (NLMS/AP/Kalman AEC, Wiener/spectral-subtraction
@@ -44,14 +61,20 @@ small fraction of a real-time budget.
 
 ## Why this, and not DeepVQE?
 
-| | DeepVQE (reference) | LocalVQE |
+Microsoft never released DeepVQE — no weights, no reference implementation,
+no streaming runtime. We re-implemented it from the paper as a GGML graph
+at [richiejp/deepvqe-ggml](https://github.com/richiejp/deepvqe-ggml) (the
+full-width ~7.5 M-parameter version) before starting LocalVQE. Comparing
+that implementation to this one:
+
+| | DeepVQE (our re-implementation) | LocalVQE |
 |---|---|---|
 | Parameters | ~7.5 M | ~0.9 M |
 | Weights (F32) | ~30 MB | ~3.5 MB |
 | Analysis | STFT (complex FFT) | DCT-II (real, in-graph) |
 | Bottleneck | GRU | S4D (diagonal state space) |
 | CCM arithmetic | Complex | Real-valued (GGML-friendly) |
-| Streaming inference | Not published | Yes, in this repo |
+| Streaming inference | Yes, separate repo | Yes, in this repo |
 
 The smaller parameter count comes from iterative channel pruning of the
 full-width reference, not from distillation; S4D halves the bottleneck
