@@ -159,6 +159,29 @@ The Nix flake's dev shell already includes `vulkan-loader`,
 from your distro (Debian: `libvulkan-dev vulkan-headers
 glslc`/`shaderc`).
 
+### Streaming latency (per-hop, 16 kHz / 256-sample hop → 16 ms budget)
+
+Measured with `bench` on Zen4 desktop (Ryzen 9 7900), 30 iters × 187 hops
+= 5 610 streaming hops per backend. Each hop is a full
+`ggml_backend_graph_compute`.
+
+| Backend                     | p50     | p99     | max (quiet) | max (with load) |
+|-----------------------------|--------:|--------:|------------:|----------------:|
+| CPU — 1 thread              | 3.46 ms | 3.59 ms |     4.93 ms |             —   |
+| CPU — 2 threads             | 2.05 ms | 2.17 ms |     3.34 ms |             —   |
+| CPU — 4 threads             | 1.26 ms | 1.48 ms |     3.07 ms |             —   |
+| Vulkan — AMD iGPU (RADV)    | 1.68 ms | 1.77 ms |     3.40 ms |       37.50 ms  |
+| Vulkan — NVIDIA RTX 5070 Ti | 1.68 ms | 1.79 ms |     3.40 ms |       31.72 ms  |
+
+Vulkan p50/p95/p99 are tight, but worst-case single-hop latency on a
+shared desktop is sensitive to external GPU clients (display compositor,
+browser). On a dedicated embedded device with no compositor contending
+for the queue, the "quiet" column is what you'll see. The bench binary
+prints the top-10 slowest hops with `(iteration, hop-in-iteration)`
+coordinates so you can check whether outliers cluster at
+post-`localvqe_reset()` boundaries (cold path) or scatter through the
+stream (external contention). In practice we see the latter.
+
 ## Running Inference
 
 ### CLI
