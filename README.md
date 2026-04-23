@@ -95,28 +95,41 @@ friendly, but quantized weights have not yet been calibrated and released.
 
 ## Validation Results
 
-Numbers below are from the best checkpoint of the AEC fine-tune
-(`localvqe-v1-f32.gguf`), evaluated on a 1 000-clip validation split mixing
-DNS5-synthesised near/far-end scenes and ICASSP AEC Challenge synthetic
-data. AECMOS scores are computed over a 100-clip sub-sample per the standard
-AEC Challenge protocol.
+### Synthetic validation split
 
-| Metric | Overall | Single-talk far-end | Double-talk |
-|---|---:|---:|---:|
-| ERLE | — | **+52.2 dB** | — |
-| AECMOS echo (↑, 1–5) | 4.36 | 4.46 | 4.33 |
-| AECMOS degradation (↑, 1–5) | 4.83 | 5.00 | 4.78 |
+1000 clips drawn from DNS5 + AEC Challenge synthetic data, AECMOS over
+a 100-clip sub-sample per the standard AEC Challenge protocol.
 
-- **ERLE** (Echo Return Loss Enhancement) in dB — higher is better. Only
-  reported for single-talk far-end, where the mic signal is pure echo and the
-  ratio `10·log10(E[mic²] / E[enh²])` directly measures echo attenuation.
-  Overall and double-talk ERLE are omitted because near-end speech in the
-  mic and enhanced signals dominates the numerator/denominator and the
-  number stops being a clean echo-removal measurement.
+| Metric | Value |
+|---|---:|
+| ERLE (dB) | 15.44 |
+| AECMOS echo (↑, 1–5) | 3.83 |
+| AECMOS degradation (↑, 1–5) | 3.91 |
+
+- **ERLE** (Echo Return Loss Enhancement) — `10·log10(E[mic²] / E[enh²])`
+  averaged across scenarios. On scenes with active near-end speech both
+  numerator and denominator are dominated by speech, so the absolute
+  value understates echo-only removal.
 - **AECMOS** (Purin et al., ICASSP 2022) is Microsoft's non-intrusive AEC
-  quality predictor. "Echo" rates how well the echo was removed; "degradation"
-  rates how clean the resulting speech/residual is. Both are on a 1–5 MOS
-  scale, higher is better.
+  quality predictor. "Echo" rates how well echo was removed; "degradation"
+  rates how clean the resulting speech is. 1–5 MOS scale, higher is better.
+
+### AEC Challenge 2022 blind set (real recordings)
+
+Stratified 150-sample eval (30 per scenario) on the
+[ICASSP 2022 AEC Challenge blind test set](https://github.com/microsoft/AEC-Challenge).
+
+| Scenario | AECMOS echo | AECMOS deg | blind ERLE |
+|---|---:|---:|---:|
+| doubletalk | 4.82 | 2.54 | 12.5 dB |
+| doubletalk-with-movement | 4.76 | 2.47 | 9.7 dB |
+| farend-singletalk | 3.45 | 4.93 | 47.7 dB |
+| farend-singletalk-with-movement | 3.96 | 4.93 | 52.5 dB |
+| nearend-singletalk | 4.94 | 3.83 | 4.7 dB |
+
+### GGUF integrity
+
+    493b0c3af8bbe9462a8cce38bc5065bcfbf763211ae98e52ed82ebe12ceec391  localvqe-v1-f32.gguf
 
 ### Why DNSMOS OVRL is not reported here
 
