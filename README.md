@@ -4,7 +4,7 @@
 acoustic echo cancellation (AEC), noise suppression, and dereverberation of
 16 kHz speech, designed to run on commodity CPUs in real time.
 
-- ~0.9 M parameters (~3.5 MB F32)
+- 1.3 M parameters (~5 MB F32)
 - ~1.66 ms per 16 ms frame on Zen4 (24 threads) — **≈9.6× realtime**
 - Causal, streaming: 256-sample hop, 16 ms algorithmic latency
 - F32 reference inference in C++ via [GGML](https://github.com/ggml-org/ggml);
@@ -69,8 +69,8 @@ that implementation to this one:
 
 | | DeepVQE (our re-implementation) | LocalVQE |
 |---|---|---|
-| Parameters | ~7.5 M | ~0.9 M |
-| Weights (F32) | ~30 MB | ~3.5 MB |
+| Parameters | ~7.5 M | 1.3 M |
+| Weights (F32) | ~30 MB | ~5 MB |
 | Analysis | STFT (complex FFT) | DCT-II (real, in-graph) |
 | Bottleneck | GRU | S4D (diagonal state space) |
 | CCM arithmetic | Complex | Real-valued (GGML-friendly) |
@@ -87,7 +87,7 @@ Pre-trained weights are published on Hugging Face at
 
 | Variant | File | Description |
 |---|---|---|
-| v1 F32 | `localvqe-v1-f32.gguf` | DNS5 pre-training + ICASSP 2022/2023 AEC Challenge fine-tune |
+| v1 F32 | `localvqe-v1-1.3M-f32.gguf` | DNS5 pre-training + ICASSP 2022/2023 AEC Challenge fine-tune |
 
 Only F32 GGUF is published today. A `quantize` tool is included in the C++
 build (see below) and the architecture is designed to be Q4_K / Q8_0
@@ -97,14 +97,15 @@ friendly, but quantized weights have not yet been calibrated and released.
 
 ### Synthetic validation split
 
-1000 clips drawn from DNS5 + AEC Challenge synthetic data, AECMOS over
-a 100-clip sub-sample per the standard AEC Challenge protocol.
+500 clips drawn from DNS5 + AEC Challenge synthetic data, stratified
+across 15 scenario cells. AECMOS over a 100-clip sub-sample per the
+standard AEC Challenge protocol.
 
 | Metric | Value |
 |---|---:|
-| ERLE (dB) | 15.44 |
+| ERLE (dB) | 11.4 |
 | AECMOS echo (↑, 1–5) | 3.83 |
-| AECMOS degradation (↑, 1–5) | 3.91 |
+| AECMOS degradation (↑, 1–5) | 4.04 |
 
 - **ERLE** (Echo Return Loss Enhancement) — `10·log10(E[mic²] / E[enh²])`
   averaged across scenarios. On scenes with active near-end speech both
@@ -121,22 +122,22 @@ Stratified 150-sample eval (30 per scenario) on the
 
 | Scenario | AECMOS echo | AECMOS deg | blind ERLE |
 |---|---:|---:|---:|
-| doubletalk | 4.82 | 2.54 | 12.5 dB |
-| doubletalk-with-movement | 4.76 | 2.47 | 9.7 dB |
-| farend-singletalk | 3.45 | 4.93 | 47.7 dB |
-| farend-singletalk-with-movement | 3.96 | 4.93 | 52.5 dB |
-| nearend-singletalk | 4.94 | 3.83 | 4.7 dB |
+| doubletalk | 4.73 | 2.09 | 11.4 dB |
+| doubletalk-with-movement | 4.72 | 2.35 | 8.3 dB |
+| farend-singletalk | 4.03 | 4.95 | 42.9 dB |
+| farend-singletalk-with-movement | 4.26 | 4.82 | 48.2 dB |
+| nearend-singletalk | 4.95 | 3.98 | 4.2 dB |
 
 ### GGUF integrity
 
-    493b0c3af8bbe9462a8cce38bc5065bcfbf763211ae98e52ed82ebe12ceec391  localvqe-v1-f32.gguf
+    7ae478bdfd867dec60236e67b3b2239abb219f62e69566f64ca7b5118f5a4dba  localvqe-v1-1.3M-f32.gguf
 
 ### Why DNSMOS OVRL is not reported here
 
 We track DNSMOS P.808 (`sig_bak_ovr.onnx`) in TensorBoard but are deliberately
 *not* publishing OVRL numbers for this model. The scores we obtain (around 2.0
 overall, 2.1 on single-talk far-end) contradict informal listening —
-single-talk far-end with 52 dB of cancellation is audibly near-silent, not a
+single-talk far-end with ~48 dB of cancellation is audibly near-silent, not a
 "2-out-of-5" output. We suspect our DNSMOS invocation (input normalisation,
 silence handling, or ONNX model variant) is miscalibrated for AEC outputs
 and in particular for near-silent clips, which are out of distribution for a
@@ -237,7 +238,7 @@ gives ~14× realtime on a single streaming context.
 ### CLI
 
 ```bash
-./ggml/build/bin/localvqe localvqe-v1-f32.gguf \
+./ggml/build/bin/localvqe localvqe-v1-1.3M-f32.gguf \
     --in-wav mic.wav ref.wav \
     --out-wav enhanced.wav
 ```
@@ -247,7 +248,7 @@ Expects 16 kHz mono PCM for both mic and far-end reference.
 ### Benchmark
 
 ```bash
-./ggml/build/bin/bench localvqe-v1-f32.gguf \
+./ggml/build/bin/bench localvqe-v1-1.3M-f32.gguf \
     --in-wav mic.wav ref.wav --iters 10 --profile
 ```
 
@@ -270,7 +271,7 @@ in the C++ build can produce GGUF variants from the F32 reference for
 experimentation:
 
 ```bash
-./ggml/build/bin/quantize localvqe-v1-f32.gguf localvqe-v1-q8.gguf Q8_0
+./ggml/build/bin/quantize localvqe-v1-1.3M-f32.gguf localvqe-v1-1.3M-q8.gguf Q8_0
 ```
 
 Expect end-to-end quality loss until proper per-tensor selection and
