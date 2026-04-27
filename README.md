@@ -117,7 +117,7 @@ Stratified 150-sample eval (30 per scenario) on the
 
 ### GGUF integrity
 
-    7ae478bdfd867dec60236e67b3b2239abb219f62e69566f64ca7b5118f5a4dba  localvqe-v1-1.3M-f32.gguf
+    f04930c099b310b82846da15b61b7926855ad7e200f31e4cc50e564ae589fa8b  localvqe-v1-1.3M-f32.gguf
 
 ## Repository Layout
 
