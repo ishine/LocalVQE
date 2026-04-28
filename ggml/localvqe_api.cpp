@@ -9,6 +9,7 @@
 
 #include "localvqe_api.h"
 #include "localvqe_graph.h"
+#include "noise_gate.h"
 
 #include <algorithm>
 #include <cmath>
@@ -38,6 +39,11 @@ struct localvqe_ctx {
     std::vector<float> ola;
 
     int frame_count = 0;
+
+    // Residual-echo noise gate. Off by default; user opts in via
+    // localvqe_set_noise_gate. Operates per-hop on the post-OLA output.
+    bool noise_gate_enabled = false;
+    float noise_gate_threshold_dbfs = -45.0f;
 
     // s16 conversion scratch (3 * hop for frame API).
     std::vector<float> s16_conv_buf;
@@ -133,6 +139,10 @@ static void stream_one_frame(localvqe_ctx* ctx, const float* mic,
     } else {
         const float scale = 0.5f;
         for (int i = 0; i < hop; i++) out[i] = ctx->ola[i] * scale;
+        if (ctx->noise_gate_enabled) {
+            localvqe::apply_noise_gate(out, hop,
+                                       ctx->noise_gate_threshold_dbfs);
+        }
     }
 
     // Slide accumulator left by hop, zero-fill the tail.
@@ -273,6 +283,28 @@ LOCALVQE_API void localvqe_reset(uintptr_t handle) {
     std::fill(ctx->pcm_hist_ref.begin(), ctx->pcm_hist_ref.end(), 0.0f);
     std::fill(ctx->ola.begin(), ctx->ola.end(), 0.0f);
     ctx->frame_count = 0;
+    // Note: gate config is intentionally NOT reset — it's caller-set
+    // policy, not stream state.
+}
+
+LOCALVQE_API int localvqe_set_noise_gate(uintptr_t handle,
+                                        int enabled,
+                                        float threshold_dbfs) {
+    if (!handle) return -1;
+    auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
+    ctx->noise_gate_enabled = (enabled != 0);
+    ctx->noise_gate_threshold_dbfs = threshold_dbfs;
+    return 0;
+}
+
+LOCALVQE_API int localvqe_get_noise_gate(uintptr_t handle,
+                                        int* enabled_out,
+                                        float* threshold_dbfs_out) {
+    if (!handle) return -1;
+    auto* ctx = reinterpret_cast<localvqe_ctx*>(handle);
+    if (enabled_out) *enabled_out = ctx->noise_gate_enabled ? 1 : 0;
+    if (threshold_dbfs_out) *threshold_dbfs_out = ctx->noise_gate_threshold_dbfs;
+    return 0;
 }
 
 } // extern "C"

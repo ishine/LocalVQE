@@ -124,6 +124,44 @@ LOCALVQE_API int localvqe_process_frame_s16(uintptr_t ctx,
  */
 LOCALVQE_API void localvqe_reset(uintptr_t ctx);
 
+/**
+ * Configure the residual-echo noise gate.
+ *
+ * When enabled, any 256-sample output hop whose RMS sits at or below
+ * `threshold_dbfs` (in dBFS) is replaced with zeros. Cleans up the
+ * model's quiet residual on FE-only / silent-NE stretches that would
+ * otherwise sound like "buffering" or amplified noise floor when the
+ * downstream player peak-normalises. Operates on the OLA-synthesised
+ * output, so it affects both the streaming and batch APIs.
+ *
+ * Off by default. Setting `threshold_dbfs = -45.0` is a reasonable
+ * starting point: it gates frames that contain only model residual
+ * (~-60 to -80 dBFS) but preserves typical speech (~-30 to -10 dBFS).
+ *
+ * Trade-off: a hard gate also mutes legitimate quiet speech below
+ * threshold (distant or whispered NE). The model's NE-preservation
+ * is the wrong place to fix this in the gate; tighten the threshold
+ * (more negative) if the model is known to preserve such cases well,
+ * loosen if not.
+ *
+ * Returns 0 on success, negative on error.
+ */
+LOCALVQE_API int localvqe_set_noise_gate(uintptr_t ctx,
+                                        int enabled,
+                                        float threshold_dbfs);
+
+/**
+ * Get the current noise-gate configuration.
+ *
+ * `enabled_out` and `threshold_dbfs_out` may each be NULL if the
+ * caller doesn't want the corresponding value.
+ *
+ * Returns 0 on success, negative on error.
+ */
+LOCALVQE_API int localvqe_get_noise_gate(uintptr_t ctx,
+                                        int* enabled_out,
+                                        float* threshold_dbfs_out);
+
 #ifdef __cplusplus
 }
 #endif

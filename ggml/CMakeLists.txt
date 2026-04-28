@@ -111,6 +111,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_streaming.cpp")
     target_link_libraries(test_streaming PRIVATE dvqe_graph)
 endif()
 
+# Noise-gate unit test (header-only utility, no model needed)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_noise_gate.cpp")
+    add_executable(test_noise_gate test_noise_gate.cpp)
+endif()
+
 # Benchmark (uses C API for WAV path)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp")
     add_executable(bench bench.cpp localvqe_api.cpp)
