@@ -79,7 +79,12 @@ int main(int argc, char** argv) {
     printf("Input: %d samples (%.2f s)\n", n, n / (float)SR);
     printf("Iterations: %d\n\n", iters);
 
-    uintptr_t ctx = localvqe_new_ex(model_path, backend_name, device_index);
+    uintptr_t opts = localvqe_options_new();
+    localvqe_options_set_model_path(opts, model_path);
+    localvqe_options_set_backend(opts, backend_name);
+    localvqe_options_set_device(opts, device_index);
+    uintptr_t ctx = localvqe_new_with_options(opts);
+    localvqe_options_free(opts);
     if (!ctx) { fprintf(stderr, "Failed to load model\n"); return 1; }
 
     if (profile) localvqe_print_profile(ctx);
