@@ -172,40 +172,36 @@ glslc`/`shaderc`).
 
 ### Streaming latency (per-hop, 16 kHz / 256-sample hop → 16 ms budget)
 
-Measured with `bench` on Zen4 desktop (Ryzen 9 7900), 30 iters × 187 hops
-= 5 610 streaming hops per backend. Each hop is a full
-`ggml_backend_graph_compute`.
+Each hop is a full `ggml_backend_graph_compute`. Run any of these locally
+with the `bench-run` cmake target — see [Benchmark](#benchmark) below.
 
-| Backend                     | p50     | p99     | max (quiet) | max (with load) |
-|-----------------------------|--------:|--------:|------------:|----------------:|
-| CPU — 1 thread              | 3.46 ms | 3.59 ms |     4.93 ms |             —   |
-| CPU — 2 threads             | 2.05 ms | 2.17 ms |     3.34 ms |             —   |
-| CPU — 4 threads             | 1.26 ms | 1.48 ms |     3.07 ms |             —   |
-| Vulkan — AMD iGPU (RADV)    | 1.68 ms | 1.77 ms |     3.40 ms |       37.50 ms  |
-| Vulkan — NVIDIA RTX 5070 Ti | 1.68 ms | 1.79 ms |     3.40 ms |       31.72 ms  |
+| Hardware                       | Backend                     | Threads | Hops    | Hop p50  | Hop p99  | Hop max  | RT factor |
+|--------------------------------|-----------------------------|--------:|--------:|---------:|---------:|---------:|----------:|
+| Ryzen 9 7900 (Zen4 desktop)    | CPU                         |       1 |   5 610 |  3.46 ms |  3.59 ms |  4.93 ms |     4.6×  |
+| Ryzen 9 7900 (Zen4 desktop)    | CPU                         |       2 |   5 610 |  2.05 ms |  2.17 ms |  3.34 ms |     7.8×  |
+| Ryzen 9 7900 (Zen4 desktop)    | CPU                         |       4 |   5 610 |  1.26 ms |  1.48 ms |  3.07 ms |    12.7×  |
+| Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       1 |  22 800 |  2.98 ms |  3.16 ms | 19.11 ms ‡ |   5.4×  |
+| Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       2 |  22 800 |  1.82 ms |  1.93 ms |  3.17 ms |     8.8×  |
+| Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       4 |  22 800 |  1.11 ms |  1.81 ms | 10.41 ms ‡ |  14.4×  |
+| Core i5-14500 (Alder Lake-S)   | CPU                         |      19 |   6 250 | 17.68 ms | 20.64 ms | 28.49 ms |     0.91× |
+| Core i5-14500 (Alder Lake-S)   | Vulkan — Arc A770 (dGPU)    |       — |   6 250 | 10.90 ms | 12.00 ms | 13.38 ms |     1.48× |
+| Core i5-14500 (Alder Lake-S)   | Vulkan — UHD 770 (iGPU)     |       — |   6 250 |  9.02 ms | 11.77 ms | 17.93 ms |     1.74× |
 
-Vulkan p50/p95/p99 are tight, but worst-case single-hop latency on a
-shared desktop is sensitive to external GPU clients (display compositor,
-browser). On a dedicated embedded device with no compositor contending
-for the queue, the "quiet" column is what you'll see. The bench binary
-prints the top-10 slowest hops with `(iteration, hop-in-iteration)`
-coordinates so you can check whether outliers cluster at
-post-`localvqe_reset()` boundaries (cold path) or scatter through the
-stream (external contention). In practice we see the latter.
+‡ Apple Silicon `max` outliers at 1 and 4 threads are single hops early
+in the first iteration (cold caches); p99 is representative of
+steady-state.
 
-Same measurement on Apple Silicon (M4, 4 P-cores + 6 E-cores, macOS 25.3),
-30 iters × 760 hops = 22 800 streaming hops per configuration, no active
-GPU contention:
+Vulkan p50/p95/p99 are typically tight, but worst-case single-hop
+latency on a shared desktop is sensitive to external GPU clients
+(display compositor, browser). On a dedicated embedded device with no
+compositor contending for the queue, expect the quieter end of the
+range.
 
-| Backend         | p50     | p99     | max      |
-|-----------------|--------:|--------:|---------:|
-| CPU — 1 thread  | 2.98 ms | 3.16 ms | 19.11 ms |
-| CPU — 2 threads | 1.82 ms | 1.93 ms |  3.17 ms |
-| CPU — 4 threads | 1.11 ms | 1.81 ms | 10.41 ms |
-
-The `max` outliers at 1 and 4 threads are single hops early in the first
-iteration (cold caches); p99 is representative of steady-state. 4 P-cores
-gives ~14× realtime on a single streaming context.
+The bench binary prints the top-10 slowest hops with
+`(iteration, hop-in-iteration)` coordinates so you can check whether
+outliers cluster at post-`localvqe_reset()` boundaries (cold path) or
+scatter through the stream (external contention). In practice we see the
+latter.
 
 ## Running Inference
 
@@ -221,8 +217,49 @@ Expects 16 kHz mono PCM for both mic and far-end reference.
 
 ### Benchmark
 
+The `bench-run` cmake target is the turnkey path: it builds `bench`,
+downloads the released F32 model and a doubletalk mic/ref WAV pair from
+HuggingFace into `ggml/build/bench_assets/`, and runs the benchmark.
+
+```bash
+# Configure once (Vulkan optional but recommended for GPU runs)
+cmake -S ggml -B ggml/build -DCMAKE_BUILD_TYPE=Release -DLOCALVQE_VULKAN=ON
+
+# Discover backends + device indices
+cmake --build ggml/build --target bench-list-devices
+
+# Run on the default backend (CPU device 0, 10 iterations)
+cmake --build ggml/build --target bench-run
+```
+
+To pick a specific backend or device, set the cache variables at
+configure time and rebuild the target:
+
+```bash
+# Vulkan device 0 (e.g. dGPU) with 30 iterations
+cmake -S ggml -B ggml/build -DBENCH_BACKEND=Vulkan -DBENCH_DEVICE=0 -DBENCH_ITERS=30
+cmake --build ggml/build --target bench-run
+
+# Vulkan device 1 (e.g. iGPU)
+cmake -S ggml -B ggml/build -DBENCH_DEVICE=1
+cmake --build ggml/build --target bench-run
+```
+
+Sweeping every backend/device on the box is just a shell loop over the
+indices `bench-list-devices` printed:
+
+```bash
+for dev in 0 1; do
+    cmake -S ggml -B ggml/build -DBENCH_BACKEND=Vulkan -DBENCH_DEVICE=$dev
+    cmake --build ggml/build --target bench-run
+done
+```
+
+Or invoke the binary directly against your own WAV pair:
+
 ```bash
 ./ggml/build/bin/bench localvqe-v1-1.3M-f32.gguf \
+    --backend Vulkan --device 0 \
     --in-wav mic.wav ref.wav --iters 10 --profile
 ```
 
