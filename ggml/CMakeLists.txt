@@ -43,9 +43,19 @@ if(LOCALVQE_VULKAN)
 endif()
 add_subdirectory(vendor/ggml)
 
-find_package(PkgConfig)
-if(PkgConfig_FOUND)
-    pkg_check_modules(SNDFILE sndfile)
+#
+# Detect libsndfile without going through pkg-config. libsndfile.pc lists
+# libFLAC / libvorbis / libogg in Requires.private; pkg_check_modules
+# refuses to declare libsndfile found when those .pc files aren't on
+# disk, even though we only link the public libsndfile.so. find_library
+# follows the actual runtime ABI.
+#
+find_library(SNDFILE_LIBRARY NAMES sndfile)
+find_path(SNDFILE_INCLUDE_DIR NAMES sndfile.h)
+if(SNDFILE_LIBRARY AND SNDFILE_INCLUDE_DIR)
+    set(SNDFILE_FOUND TRUE)
+    set(SNDFILE_LIBRARIES ${SNDFILE_LIBRARY})
+    set(SNDFILE_INCLUDE_DIRS ${SNDFILE_INCLUDE_DIR})
 endif()
 
 # Common library (npy I/O, comparison utilities, GGUF tensor loading).
