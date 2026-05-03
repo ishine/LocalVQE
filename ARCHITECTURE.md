@@ -46,11 +46,11 @@ redesigns several components for efficient quantized CPU inference.
 | AlignBlock | Cross-attention soft delay, `dmax = 32` (320 ms), `h = 32` similarity channels |
 | Encoder block 3 | 80 → 40 (concat mic + aligned far-end) |
 | Bottleneck | S4D (diagonal state-space), hidden = 162 |
-| Decoder | 5 blocks, sub-pixel upsampling + BatchNorm, mirroring encoder |
+| Decoder | 5 blocks, sub-pixel upsampling, mirroring encoder |
 | Mask head | 1×1 Conv2d → 27 channels |
 | CCM | 27 channels → 3×3 complex convolving mask (real-valued arithmetic) |
 | Kernel | (4, 4) time × frequency, causal padding |
-| Parameters | ~0.9 M |
+| Parameters | ~1.3 M |
 | Receptive field | ≈320 ms (AlignBlock) + conv stack |
 
 ### STFT-256 Analysis/Synthesis

@@ -9,18 +9,15 @@ acoustic echo cancellation (AEC), noise suppression, and dereverberation of
 - Causal, streaming: 256-sample hop, 16 ms algorithmic latency
 - F32 reference inference in C++ via [GGML](https://github.com/ggml-org/ggml);
   PyTorch reference included for verification and research
-- Quantization-friendly by design (power-of-2 channel widths, kernel area 16)
-  to support future Q4_K / Q8_0 native inference
 - Apache 2.0
 
 LocalVQE is a derivative of **DeepVQE**
-([Indenbom et al., Interspeech 2023](https://arxiv.org/abs/2306.03177)).
-It keeps DeepVQE's overall topology (mic/far-end encoders, soft-delay cross
-attention, decoder with sub-pixel upsampling, complex convolving mask) but
-replaces the STFT with an in-graph DCT-II filterbank, swaps the GRU
-bottleneck for a diagonal state-space model (S4D), and is ~9× smaller than
-the reference DeepVQE. Everything specific to LocalVQE is original to this
-repository — there is no LocalVQE paper.
+([Indenbom et al., Interspeech 2023](https://arxiv.org/abs/2306.03177)) —
+smaller, GGML-native, and tuned for streaming CPU inference. The
+architecture, training recipe, and reproducibility checks are
+documented in the [technical report](paper/localvqe.tex) under
+`paper/`; this README covers building and running the published
+weights only.
 
 ## A concrete example
 
@@ -61,51 +58,44 @@ small fraction of a real-time budget.
 
 ## Why this, and not DeepVQE?
 
-Microsoft never released DeepVQE — no weights, no reference implementation,
-no streaming runtime. We re-implemented it from the paper as a GGML graph
-at [richiejp/deepvqe-ggml](https://github.com/richiejp/deepvqe-ggml) (the
-full-width ~7.5 M-parameter version) before starting LocalVQE. Comparing
-that implementation to this one:
-
-| | DeepVQE (our re-implementation) | LocalVQE |
-|---|---|---|
-| Parameters | ~7.5 M | 1.3 M |
-| Weights (F32) | ~30 MB | ~5 MB |
-| Analysis | STFT (complex FFT) | DCT-II (real, in-graph) |
-| Bottleneck | GRU | S4D (diagonal state space) |
-| CCM arithmetic | Complex | Real-valued (GGML-friendly) |
-| Streaming inference | Yes, separate repo | Yes, in this repo |
-
-The smaller parameter count comes from iterative channel pruning of the
-full-width reference, not from distillation; S4D halves the bottleneck
-parameter count vs GRU at similar quality.
+Microsoft never released DeepVQE — no weights, no reference
+implementation, no streaming runtime. We re-implemented it from the
+paper as a GGML graph at
+[richiejp/deepvqe-ggml](https://github.com/richiejp/deepvqe-ggml)
+(the full-width ~7.5 M-parameter version) before starting LocalVQE.
+LocalVQE is the same idea pruned and rebuilt to ~1.3 M parameters
+(~5 MB F32), small enough to run on commodity CPUs in real time.
 
 ## Model Weights
 
 Pre-trained weights are published on Hugging Face at
 [LocalAI-io/LocalVQE](https://huggingface.co/LocalAI-io/LocalVQE):
 
-| Variant | File | Description |
-|---|---|---|
-| v1 F32 | `localvqe-v1-1.3M-f32.gguf` | DNS5 pre-training + ICASSP 2022/2023 AEC Challenge fine-tune |
+| File | Description |
+|---|---|
+| `localvqe-v1.1-1.3M-f32.gguf` | F32 GGUF — what the C++ engine loads. |
+| `localvqe-v1.1-1.3M.pt` | PyTorch checkpoint — for verification, ablation, and downstream research. |
 
-Only F32 GGUF is published today. A `quantize` tool is included in the C++
-build (see below) and the architecture is designed to be Q4_K / Q8_0
-friendly, but quantized weights have not yet been calibrated and released.
+The current release is **v1.1**, which fixes intermittent crackling
+the previous release produced under heavy background noise.
+
+Only F32 is published today. A `quantize` tool is included in the C++
+build (see below); calibrated Q4_K / Q8_0 weights are not yet
+released.
 
 ## Validation Results
 
-Stratified 150-sample eval (30 per scenario) on the
+Full 800-clip eval on the
 [ICASSP 2022 AEC Challenge blind test set](https://github.com/microsoft/AEC-Challenge)
-— real recordings, not synthetic mixes.
+(real recordings, not synthetic mixes):
 
-| Scenario | AECMOS echo | AECMOS deg | blind ERLE |
-|---|---:|---:|---:|
-| doubletalk | 4.71 | 2.35 | 8.5 dB |
-| doubletalk-with-movement | 4.67 | 2.33 | 8.1 dB |
-| farend-singletalk | 4.12 | 4.94 | 40.6 dB |
-| farend-singletalk-with-movement | 4.31 | 4.98 | 39.0 dB |
-| nearend-singletalk | 5.00 | 4.15 | 1.9 dB |
+| Scenario                          |   n | AECMOS echo ↑ | AECMOS deg ↑ | blind ERLE ↑ | DNSMOS OVRL ↑ |
+|-----------------------------------|----:|--------------:|-------------:|-------------:|--------------:|
+| doubletalk                        | 115 |          4.70 |         2.35 |       8.4 dB |          2.85 |
+| doubletalk-with-movement          | 185 |          4.63 |         2.35 |       8.3 dB |          2.80 |
+| farend-singletalk                 | 107 |          2.98 |         4.91 |      44.7 dB |          1.93 |
+| farend-singletalk-with-movement   | 193 |          3.40 |         4.95 |      45.0 dB |          1.91 |
+| nearend-singletalk                | 200 |          4.99 |         4.05 |       2.5 dB |          3.13 |
 
 - **AECMOS** (Purin et al., ICASSP 2022) is Microsoft's non-intrusive AEC
   quality predictor. "Echo" rates how well echo was removed; "degradation"
@@ -115,9 +105,9 @@ Stratified 150-sample eval (30 per scenario) on the
   near-end speech it understates echo removal because both numerator and
   denominator are dominated by speech.
 
-### GGUF integrity
+PyTorch checkpoint integrity (SHA256):
 
-    d5eaf577449d0f920d8ee5e1042b8ddc7b6627313a042c62e2ada1b42719ab30  localvqe-v1-1.3M-f32.gguf
+    76aabaa3bca3a9d7989463226312aa2344f978403c3e0e007e58a15922c97707  localvqe-v1.1-1.3M.pt
 
 ## Repository Layout
 
@@ -172,27 +162,33 @@ glslc`/`shaderc`).
 
 ### Streaming latency (per-hop, 16 kHz / 256-sample hop → 16 ms budget)
 
-Each hop is a full `ggml_backend_graph_compute`. Run any of these locally
-with the `bench-run` cmake target — see [Benchmark](#benchmark) below.
+Each hop is a full `ggml_backend_graph_compute`. Run any of these
+locally with the `bench-run` cmake target — see [Benchmark](#benchmark)
+below. 30 iters × 625 hops/iter = 18 750 hops per row.
 
-| Hardware                       | Backend                     | Threads | Hops    | Hop p50  | Hop p99  | Hop max  | RT factor |
-|--------------------------------|-----------------------------|--------:|--------:|---------:|---------:|---------:|----------:|
-| Ryzen 9 7900 (Zen4 desktop)    | CPU                         |       1 |   5 610 |  3.46 ms |  3.59 ms |  4.93 ms |     4.6×  |
-| Ryzen 9 7900 (Zen4 desktop)    | CPU                         |       2 |   5 610 |  2.05 ms |  2.17 ms |  3.34 ms |     7.8×  |
-| Ryzen 9 7900 (Zen4 desktop)    | CPU                         |       4 |   5 610 |  1.26 ms |  1.48 ms |  3.07 ms |    12.7×  |
-| Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       1 |  22 800 |  2.98 ms |  3.16 ms | 19.11 ms ‡ |   5.4×  |
-| Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       2 |  22 800 |  1.82 ms |  1.93 ms |  3.17 ms |     8.8×  |
-| Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       4 |  22 800 |  1.11 ms |  1.81 ms | 10.41 ms ‡ |  14.4×  |
-| Core i5-14500 (Alder Lake-S)   | CPU                         |       1 |   6 250 |  3.25 ms |  3.53 ms |  6.73 ms |     4.93× |
-| Core i5-14500 (Alder Lake-S)   | CPU                         |       2 |   6 250 |  2.55 ms |  2.81 ms |  5.20 ms |     6.23× |
-| Core i5-14500 (Alder Lake-S)   | CPU                         |       3 |   6 250 |  2.26 ms |  3.09 ms |  3.85 ms |     7.06× |
-| Core i5-14500 (Alder Lake-S)   | CPU                         |       4 |   6 250 |  2.02 ms |  2.89 ms |  3.59 ms |     7.79× |
-| Core i5-14500 (Alder Lake-S)   | Vulkan — Arc A770 (dGPU)    |       — |   6 250 | 10.90 ms | 12.00 ms | 13.38 ms |     1.48× |
-| Core i5-14500 (Alder Lake-S)   | Vulkan — UHD 770 (iGPU)     |       — |   6 250 |  9.02 ms | 11.77 ms | 17.93 ms |     1.74× |
+| Hardware                       | Backend                     | Threads | Hop p50  | Hop p99  | Hop max    | RT factor |
+|--------------------------------|-----------------------------|--------:|---------:|---------:|-----------:|----------:|
+| Ryzen 9 7900 (Zen4 desktop)    | CPU                         |       1 |  3.40 ms |  3.57 ms |  5.06 ms   |     4.7×  |
+| Ryzen 9 7900 (Zen4 desktop)    | CPU                         |       2 |  2.07 ms |  2.25 ms |  3.65 ms   |     7.7×  |
+| Ryzen 9 7900 (Zen4 desktop)    | CPU                         |       4 |  1.32 ms |  1.57 ms |  6.91 ms ‡ |    12.0×  |
+| Ryzen 9 7900 (Zen4 desktop)    | Vulkan — RADV iGPU (Raphael)|       — |  4.43 ms |  4.62 ms |  5.07 ms   |     3.60× |
+| Ryzen 9 7900 (Zen4 desktop)    | Vulkan — RTX 5070 Ti (dGPU) |       — |  1.79 ms |  3.41 ms |  4.14 ms   |     8.63× |
+| Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       1 |  2.98 ms |  3.16 ms | 19.11 ms ‡ |     5.4×  |
+| Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       2 |  1.82 ms |  1.93 ms |  3.17 ms   |     8.8×  |
+| Apple M4 (4P + 6E, macOS 25.3) | CPU                         |       4 |  1.11 ms |  1.81 ms | 10.41 ms ‡ |    14.4×  |
+| Core i5-14500 (Alder Lake-S)   | CPU                         |       1 |  3.25 ms |  3.53 ms |  6.73 ms   |     4.93× |
+| Core i5-14500 (Alder Lake-S)   | CPU                         |       2 |  2.55 ms |  2.81 ms |  5.20 ms   |     6.23× |
+| Core i5-14500 (Alder Lake-S)   | CPU                         |       3 |  2.26 ms |  3.09 ms |  3.85 ms   |     7.06× |
+| Core i5-14500 (Alder Lake-S)   | CPU                         |       4 |  2.02 ms |  2.89 ms |  3.59 ms   |     7.79× |
+| Core i5-14500 (Alder Lake-S)   | Vulkan — Arc A770 (dGPU)    |       — | 10.90 ms | 12.00 ms | 13.38 ms   |     1.48× |
+| Core i5-14500 (Alder Lake-S)   | Vulkan — UHD 770 (iGPU)     |       — |  9.02 ms | 11.77 ms | 17.93 ms   |     1.74× |
 
-‡ Apple Silicon `max` outliers at 1 and 4 threads are single hops early
-in the first iteration (cold caches); p99 is representative of
-steady-state.
+Zen4 rows are measured on the v1.1 model. Apple M4 and Alder Lake
+rows were measured on the previous release; CPU latency is unchanged
+to within measurement noise so they remain representative.
+
+‡ Outliers are single hops early in the first iteration (cold
+caches); p99 is representative of steady-state.
 
 Vulkan p50/p95/p99 are typically tight, but worst-case single-hop
 latency on a shared desktop is sensitive to external GPU clients
@@ -211,7 +207,7 @@ latter.
 ### CLI
 
 ```bash
-./ggml/build/bin/localvqe localvqe-v1-1.3M-f32.gguf \
+./ggml/build/bin/localvqe localvqe-v1.1-1.3M-f32.gguf \
     --in-wav mic.wav ref.wav \
     --out-wav enhanced.wav
 ```
@@ -261,7 +257,7 @@ done
 Or invoke the binary directly against your own WAV pair:
 
 ```bash
-./ggml/build/bin/bench localvqe-v1-1.3M-f32.gguf \
+./ggml/build/bin/bench localvqe-v1.1-1.3M-f32.gguf \
     --backend Vulkan --device 0 \
     --in-wav mic.wav ref.wav --iters 10 --profile
 ```
@@ -278,14 +274,12 @@ Produces `liblocalvqe.so` with the API in `ggml/localvqe_api.h`. See
 
 ### Quantizing (experimental)
 
-The model was designed with quantization in mind — power-of-two channel
-widths, kernel area 16, GGML-friendly real-valued arithmetic — but
-calibrated Q4_K / Q8_0 weights are not yet published. The `quantize` tool
-in the C++ build can produce GGUF variants from the F32 reference for
-experimentation:
+Calibrated Q4_K / Q8_0 weights are not yet published. The `quantize`
+tool in the C++ build can produce GGUF variants from the F32 reference
+for experimentation:
 
 ```bash
-./ggml/build/bin/quantize localvqe-v1-1.3M-f32.gguf localvqe-v1-1.3M-q8.gguf Q8_0
+./ggml/build/bin/quantize localvqe-v1.1-1.3M-f32.gguf localvqe-v1.1-1.3M-q8.gguf Q8_0
 ```
 
 Expect end-to-end quality loss until proper per-tensor selection and
