@@ -18,6 +18,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -565,6 +566,11 @@ bool load_graph_model_ex(const char* path, dvqe_graph_model& model,
     idx = gguf_find_key(gctx, "localvqe.bottleneck_hidden");
     hp.bottleneck_hidden = idx >= 0 ? (int)gguf_get_val_u32(gctx, idx) : 0;
 
+    // Architecture version: 1 = post-conv BN+ELU (legacy), 2 = pre-norm
+    // CausalGroupNorm + ReLU6 (v1.1 onward).
+    idx = gguf_find_key(gctx, "localvqe.version");
+    hp.version = idx >= 0 ? (int)gguf_get_val_u32(gctx, idx) : 1;
+
     int mic_n = (int)gguf_u32(gctx, "localvqe.mic_channels.count");
     hp.mic_channels.resize(mic_n);
     for (int i = 0; i < mic_n; i++) {
@@ -741,6 +747,76 @@ static struct ggml_tensor* build_encoder_block_s(
     struct ggml_tensor* res = build_causal_conv_s(ctx, sg, y, res_w, res_b, 1);
     res = ggml_reshape_3d(ctx, res, res->ne[0], res->ne[1], res->ne[2]);
     res = ggml_add(ctx, ggml_elu(ctx, res), y);
+
+    return res;
+}
+
+// CausalGroupNorm: per-frame normalization over (F, C). Streaming-safe —
+// stats at frame t depend only on frame t's channels and freqs.
+//
+//   y = gamma * (x - mean(F, C)) / sqrt(var(F, C) + eps) + beta
+//
+// Input  x:     (F, T=1, C)
+// Params gamma: (C,), beta: (C,)
+// Output:       (F, 1, C)
+static struct ggml_tensor* build_causal_groupnorm(
+    struct ggml_context* ctx,
+    struct ggml_tensor* x,
+    struct ggml_tensor* gamma,
+    struct ggml_tensor* beta,
+    float eps = 1e-5f
+) {
+    int64_t F = x->ne[0];
+    int64_t T = x->ne[1];
+    int64_t C = x->ne[2];
+
+    // Permute (F, T, C) -> (F, C, T) so all (F, C) values for a given T
+    // become contiguous along ne[0]*ne[1].
+    struct ggml_tensor* perm = ggml_cont(ctx, ggml_permute(ctx, x, 0, 2, 1, 3));
+    // Flatten F*C into ne[0] so ggml_norm reduces over both.
+    struct ggml_tensor* flat = ggml_reshape_2d(ctx, perm, F * C, T);
+    // ggml_norm: (x - mean(ne0)) / sqrt(var(ne0) + eps) per row.
+    struct ggml_tensor* normed = ggml_norm(ctx, flat, eps);
+    // Restore (F, C, T).
+    struct ggml_tensor* y = ggml_reshape_3d(ctx, normed, F, C, T);
+    // Per-channel affine: gamma, beta have shape (C,) → broadcast over (F, _, T).
+    struct ggml_tensor* g = ggml_reshape_3d(ctx, gamma, 1, C, 1);
+    struct ggml_tensor* b = ggml_reshape_3d(ctx, beta,  1, C, 1);
+    y = ggml_add(ctx, ggml_mul(ctx, y, g), b);
+    // Permute back to (F, T, C).
+    return ggml_cont(ctx, ggml_permute(ctx, y, 0, 2, 1, 3));
+}
+
+// ReLU6: clamp(x, 0, 6). Bounded activation makes INT8 quantisation α
+// analytical (= 6/127) and removes outlier-driven scale drift.
+static inline struct ggml_tensor* build_relu6(struct ggml_context* ctx,
+                                              struct ggml_tensor* x) {
+    return ggml_clamp(ctx, x, 0.0f, 6.0f);
+}
+
+// v1.1 streaming encoder block: pre-norm + conv + ReLU6, with a residual
+// sub-block that is itself pre-normed:
+//   y = ReLU6(conv_main(pad(norm_main(x))))            stride 2 in F
+//   res = ReLU6(conv_res(pad(norm_res(y))))            stride 1
+//   out = res + y
+static struct ggml_tensor* build_encoder_block_s_v11(
+    struct ggml_context* ctx,
+    dvqe_stream_graph& sg,
+    struct ggml_tensor* x,
+    struct ggml_tensor* norm_w,    struct ggml_tensor* norm_b,
+    struct ggml_tensor* conv_w,    struct ggml_tensor* conv_b,
+    struct ggml_tensor* res_norm_w,struct ggml_tensor* res_norm_b,
+    struct ggml_tensor* res_w,     struct ggml_tensor* res_b
+) {
+    struct ggml_tensor* xn = build_causal_groupnorm(ctx, x, norm_w, norm_b);
+    struct ggml_tensor* y = build_causal_conv_s(ctx, sg, xn, conv_w, conv_b, 2);
+    y = build_relu6(ctx, y);
+    y = ggml_reshape_3d(ctx, y, y->ne[0], y->ne[1], y->ne[2]);
+
+    struct ggml_tensor* yn = build_causal_groupnorm(ctx, y, res_norm_w, res_norm_b);
+    struct ggml_tensor* res = build_causal_conv_s(ctx, sg, yn, res_w, res_b, 1);
+    res = ggml_reshape_3d(ctx, res, res->ne[0], res->ne[1], res->ne[2]);
+    res = ggml_add(ctx, build_relu6(ctx, res), y);
 
     return res;
 }
@@ -979,6 +1055,65 @@ static struct ggml_tensor* build_decoder_block_s(
     return shuffled;
 }
 
+// v1.1 streaming decoder block:
+//   skip_proj = skip_conv(skip_norm(x_en))
+//   y = x + skip_proj
+//   y = y + ReLU6(conv_res(norm_res(y)))             ResidualBlock
+//   y = pixel_shuffle(conv_dec(norm_dec(y)))         SubpixelConv2d
+//   if not last: y = ReLU6(y)                        (no ChannelAffine)
+static struct ggml_tensor* build_decoder_block_s_v11(
+    struct ggml_context* ctx,
+    dvqe_stream_graph& sg,
+    struct ggml_tensor* x,             // (F, 1, C)
+    struct ggml_tensor* x_en,          // (F, 1, C) encoder skip
+    struct ggml_tensor* skip_norm_w,   struct ggml_tensor* skip_norm_b,
+    struct ggml_tensor* skip_w,        struct ggml_tensor* skip_b,
+    struct ggml_tensor* res_norm_w,    struct ggml_tensor* res_norm_b,
+    struct ggml_tensor* res_w,         struct ggml_tensor* res_b,
+    struct ggml_tensor* deconv_norm_w, struct ggml_tensor* deconv_norm_b,
+    struct ggml_tensor* deconv_w,      struct ggml_tensor* deconv_b,
+    bool is_last
+) {
+    int64_t F = x->ne[0], C = x->ne[2];
+
+    // Pre-norm the encoder skip, then 1x1 project.
+    struct ggml_tensor* x_en_n = build_causal_groupnorm(ctx, x_en,
+                                                        skip_norm_w, skip_norm_b);
+    struct ggml_tensor* x_en_4d = ggml_reshape_4d(ctx, x_en_n, F, 1, C, 1);
+    if (skip_w->ne[2] > C) {
+        x_en_4d = ggml_pad_ext(ctx, x_en_4d, 0, 0, 0, 0, 0, skip_w->ne[2] - C, 0, 0);
+    }
+    struct ggml_tensor* skip = ggml_conv_2d(ctx, skip_w, x_en_4d, 1, 1, 0, 0, 1, 1);
+    struct ggml_tensor* sb = ggml_reshape_4d(ctx, skip_b, 1, 1, skip_b->ne[0], 1);
+    skip = ggml_add(ctx, skip, sb);
+    skip = ggml_reshape_3d(ctx, skip, F, 1, C);
+
+    struct ggml_tensor* y = ggml_add(ctx, x, skip);
+
+    // ResidualBlock with internal pre-norm.
+    struct ggml_tensor* yn = build_causal_groupnorm(ctx, y, res_norm_w, res_norm_b);
+    struct ggml_tensor* res = build_causal_conv_s(ctx, sg, yn, res_w, res_b, 1);
+    res = ggml_reshape_3d(ctx, res, F, 1, C);
+    res = ggml_add(ctx, build_relu6(ctx, res), y);
+
+    // SubpixelConv2d with internal pre-norm.
+    int64_t C_out = deconv_w->ne[3] / 2;
+    struct ggml_tensor* res_n = build_causal_groupnorm(ctx, res,
+                                                       deconv_norm_w, deconv_norm_b);
+    struct ggml_tensor* deconv = build_causal_conv_s(ctx, sg, res_n, deconv_w, deconv_b, 1);
+    deconv = ggml_reshape_3d(ctx, deconv, F, 1, C_out * 2);
+
+    // Pixel shuffle: (F, 1, 2*C_out) -> (2*F, 1, C_out).
+    struct ggml_tensor* r1 = ggml_reshape_4d(ctx, deconv, F, 1, C_out, 2);
+    struct ggml_tensor* r2 = ggml_permute(ctx, r1, 0, 2, 3, 1);
+    struct ggml_tensor* shuffled = ggml_reshape_3d(ctx, ggml_cont(ctx, r2), 2 * F, 1, C_out);
+
+    if (!is_last) {
+        shuffled = build_relu6(ctx, shuffled);
+    }
+    return shuffled;
+}
+
 // Streaming CCM: complex convolving mask with STFT history.
 static struct ggml_tensor* build_ccm_s(
     struct ggml_context* ctx,
@@ -1108,23 +1243,37 @@ bool build_stream_graph(dvqe_graph_model& m, dvqe_stream_graph& sg) {
     struct ggml_tensor* mic_fe = build_fe(ctx, sg.mic_in, hp.power_law_c);
     struct ggml_tensor* ref_fe = build_fe(ctx, sg.ref_in, hp.power_law_c);
 
-    // 2. Mic encoder 1-2
-    struct ggml_tensor* mic_e1 = build_encoder_block_s(ctx, sg, mic_fe,
-        m.w("mic_enc1.conv.weight"), m.w("mic_enc1.conv.bias"),
-        m.w("mic_enc1.resblock.conv.weight"), m.w("mic_enc1.resblock.conv.bias"));
+    // 2-3. Encoder blocks.
+    //
+    // v1: post-conv BN folded into conv weights, ELU activation. The block
+    //     builder takes only main + residual conv tensors.
+    // v1.1: pre-norm CausalGroupNorm + ReLU6. The block builder also takes
+    //     two extra norm tensor pairs (one for main, one for residual).
+    const bool is_v11 = (m.hparams.version >= 2);
+    auto enc = [&](struct ggml_tensor* x, const char* prefix) -> struct ggml_tensor* {
+        std::string p = prefix;
+        if (is_v11) {
+            return build_encoder_block_s_v11(ctx, sg, x,
+                m.w((p + ".norm.weight").c_str()),
+                m.w((p + ".norm.bias").c_str()),
+                m.w((p + ".conv.weight").c_str()),
+                m.w((p + ".conv.bias").c_str()),
+                m.w((p + ".resblock.norm.weight").c_str()),
+                m.w((p + ".resblock.norm.bias").c_str()),
+                m.w((p + ".resblock.conv.weight").c_str()),
+                m.w((p + ".resblock.conv.bias").c_str()));
+        }
+        return build_encoder_block_s(ctx, sg, x,
+            m.w((p + ".conv.weight").c_str()),
+            m.w((p + ".conv.bias").c_str()),
+            m.w((p + ".resblock.conv.weight").c_str()),
+            m.w((p + ".resblock.conv.bias").c_str()));
+    };
 
-    struct ggml_tensor* mic_e2 = build_encoder_block_s(ctx, sg, mic_e1,
-        m.w("mic_enc2.conv.weight"), m.w("mic_enc2.conv.bias"),
-        m.w("mic_enc2.resblock.conv.weight"), m.w("mic_enc2.resblock.conv.bias"));
-
-    // 3. Far-end encoder 1-2
-    struct ggml_tensor* far_e1 = build_encoder_block_s(ctx, sg, ref_fe,
-        m.w("far_enc1.conv.weight"), m.w("far_enc1.conv.bias"),
-        m.w("far_enc1.resblock.conv.weight"), m.w("far_enc1.resblock.conv.bias"));
-
-    struct ggml_tensor* far_e2 = build_encoder_block_s(ctx, sg, far_e1,
-        m.w("far_enc2.conv.weight"), m.w("far_enc2.conv.bias"),
-        m.w("far_enc2.resblock.conv.weight"), m.w("far_enc2.resblock.conv.bias"));
+    struct ggml_tensor* mic_e1 = enc(mic_fe, "mic_enc1");
+    struct ggml_tensor* mic_e2 = enc(mic_e1, "mic_enc2");
+    struct ggml_tensor* far_e1 = enc(ref_fe, "far_enc1");
+    struct ggml_tensor* far_e2 = enc(far_e1, "far_enc2");
 
     // 4. Alignment
     struct ggml_tensor* aligned = build_align_s(ctx, sg, mic_e2, far_e2,
@@ -1135,17 +1284,9 @@ bool build_stream_graph(dvqe_graph_model& m, dvqe_stream_graph& sg) {
 
     // 5. Concat + encoder 3-5
     struct ggml_tensor* cat = build_concat_channels(ctx, mic_e2, aligned);
-    struct ggml_tensor* mic_e3 = build_encoder_block_s(ctx, sg, cat,
-        m.w("mic_enc3.conv.weight"), m.w("mic_enc3.conv.bias"),
-        m.w("mic_enc3.resblock.conv.weight"), m.w("mic_enc3.resblock.conv.bias"));
-
-    struct ggml_tensor* mic_e4 = build_encoder_block_s(ctx, sg, mic_e3,
-        m.w("mic_enc4.conv.weight"), m.w("mic_enc4.conv.bias"),
-        m.w("mic_enc4.resblock.conv.weight"), m.w("mic_enc4.resblock.conv.bias"));
-
-    struct ggml_tensor* mic_e5 = build_encoder_block_s(ctx, sg, mic_e4,
-        m.w("mic_enc5.conv.weight"), m.w("mic_enc5.conv.bias"),
-        m.w("mic_enc5.resblock.conv.weight"), m.w("mic_enc5.resblock.conv.bias"));
+    struct ggml_tensor* mic_e3 = enc(cat,    "mic_enc3");
+    struct ggml_tensor* mic_e4 = enc(mic_e3, "mic_enc4");
+    struct ggml_tensor* mic_e5 = enc(mic_e4, "mic_enc5");
 
     // 6. S4D Bottleneck (single step)
     struct ggml_tensor* bn = build_bottleneck_s(ctx, sg, mic_e5,
@@ -1157,39 +1298,46 @@ bool build_stream_graph(dvqe_graph_model& m, dvqe_stream_graph& sg) {
         m.w("bottleneck.D"));
 
     // 7. Decoder with skip connections + frequency trimming
-    struct ggml_tensor* d5 = build_decoder_block_s(ctx, sg, bn, mic_e5,
-        m.w("dec5.skip_conv.weight"), m.w("dec5.skip_conv.bias"),
-        m.w("dec5.resblock.conv.weight"), m.w("dec5.resblock.conv.bias"),
-        m.w("dec5.deconv.conv.weight"), m.w("dec5.deconv.conv.bias"),
-        m.w("dec5.bn.scale"), m.w("dec5.bn.bias"), false);
+    auto dec = [&](struct ggml_tensor* x, struct ggml_tensor* x_en,
+                   const char* prefix, bool is_last) -> struct ggml_tensor* {
+        std::string p = prefix;
+        if (is_v11) {
+            return build_decoder_block_s_v11(ctx, sg, x, x_en,
+                m.w((p + ".skip_norm.weight").c_str()),
+                m.w((p + ".skip_norm.bias").c_str()),
+                m.w((p + ".skip_conv.weight").c_str()),
+                m.w((p + ".skip_conv.bias").c_str()),
+                m.w((p + ".resblock.norm.weight").c_str()),
+                m.w((p + ".resblock.norm.bias").c_str()),
+                m.w((p + ".resblock.conv.weight").c_str()),
+                m.w((p + ".resblock.conv.bias").c_str()),
+                m.w((p + ".deconv.norm.weight").c_str()),
+                m.w((p + ".deconv.norm.bias").c_str()),
+                m.w((p + ".deconv.conv.weight").c_str()),
+                m.w((p + ".deconv.conv.bias").c_str()),
+                is_last);
+        }
+        return build_decoder_block_s(ctx, sg, x, x_en,
+            m.w((p + ".skip_conv.weight").c_str()),
+            m.w((p + ".skip_conv.bias").c_str()),
+            m.w((p + ".resblock.conv.weight").c_str()),
+            m.w((p + ".resblock.conv.bias").c_str()),
+            m.w((p + ".deconv.conv.weight").c_str()),
+            m.w((p + ".deconv.conv.bias").c_str()),
+            is_last ? nullptr : m.w((p + ".bn.scale").c_str()),
+            is_last ? nullptr : m.w((p + ".bn.bias").c_str()),
+            is_last);
+    };
+
+    struct ggml_tensor* d5 = dec(bn, mic_e5, "dec5", false);
     d5 = build_freq_trim(ctx, d5, mic_e4->ne[0]);
-
-    struct ggml_tensor* d4 = build_decoder_block_s(ctx, sg, d5, mic_e4,
-        m.w("dec4.skip_conv.weight"), m.w("dec4.skip_conv.bias"),
-        m.w("dec4.resblock.conv.weight"), m.w("dec4.resblock.conv.bias"),
-        m.w("dec4.deconv.conv.weight"), m.w("dec4.deconv.conv.bias"),
-        m.w("dec4.bn.scale"), m.w("dec4.bn.bias"), false);
+    struct ggml_tensor* d4 = dec(d5, mic_e4, "dec4", false);
     d4 = build_freq_trim(ctx, d4, mic_e3->ne[0]);
-
-    struct ggml_tensor* d3 = build_decoder_block_s(ctx, sg, d4, mic_e3,
-        m.w("dec3.skip_conv.weight"), m.w("dec3.skip_conv.bias"),
-        m.w("dec3.resblock.conv.weight"), m.w("dec3.resblock.conv.bias"),
-        m.w("dec3.deconv.conv.weight"), m.w("dec3.deconv.conv.bias"),
-        m.w("dec3.bn.scale"), m.w("dec3.bn.bias"), false);
+    struct ggml_tensor* d3 = dec(d4, mic_e3, "dec3", false);
     d3 = build_freq_trim(ctx, d3, mic_e2->ne[0]);
-
-    struct ggml_tensor* d2 = build_decoder_block_s(ctx, sg, d3, mic_e2,
-        m.w("dec2.skip_conv.weight"), m.w("dec2.skip_conv.bias"),
-        m.w("dec2.resblock.conv.weight"), m.w("dec2.resblock.conv.bias"),
-        m.w("dec2.deconv.conv.weight"), m.w("dec2.deconv.conv.bias"),
-        m.w("dec2.bn.scale"), m.w("dec2.bn.bias"), false);
+    struct ggml_tensor* d2 = dec(d3, mic_e2, "dec2", false);
     d2 = build_freq_trim(ctx, d2, mic_e1->ne[0]);
-
-    struct ggml_tensor* d1 = build_decoder_block_s(ctx, sg, d2, mic_e1,
-        m.w("dec1.skip_conv.weight"), m.w("dec1.skip_conv.bias"),
-        m.w("dec1.resblock.conv.weight"), m.w("dec1.resblock.conv.bias"),
-        m.w("dec1.deconv.conv.weight"), m.w("dec1.deconv.conv.bias"),
-        nullptr, nullptr, true);
+    struct ggml_tensor* d1 = dec(d2, mic_e1, "dec1", true);
     d1 = build_freq_trim(ctx, d1, mic_fe->ne[0]);
 
     // 8. CCM

@@ -39,6 +39,8 @@ bool load_model(const char* path, localvqe_model& model, bool verbose) {
     hp.power_law_c = idx >= 0 ? gguf_get_val_f32(gctx, idx) : 0.3f;
     idx = gguf_find_key(gctx, "localvqe.bn_folded");
     hp.bn_folded = idx >= 0 ? gguf_get_val_bool(gctx, idx) : true;
+    idx = gguf_find_key(gctx, "localvqe.version");
+    hp.version = idx >= 0 ? (int)gguf_get_val_u32(gctx, idx) : 1;
 
     // Kernel size (default to 4x3 for backward compat)
     idx = gguf_find_key(gctx, "localvqe.kernel_size_h");

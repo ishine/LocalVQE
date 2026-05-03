@@ -9,9 +9,9 @@ redesigns several components for efficient quantized CPU inference.
 ## Signal Flow
 
 ```
- mic PCM ──► DCT-II analysis ──┐
-                               ├─► mic encoder (5 blocks) ──┐
- far PCM ──► DCT-II analysis ──┴─► far encoder (2 blocks)   │
+ mic PCM ──► STFT-256 analysis ─┐
+                                ├─► mic encoder (5 blocks) ──┐
+ far PCM ──► STFT-256 analysis ─┴─► far encoder (2 blocks)   │
                                                             ▼
                                                       AlignBlock
                                                    (soft delay est.)
@@ -29,7 +29,7 @@ redesigns several components for efficient quantized CPU inference.
                                                             ▼
                                      CCM (3×3 complex convolving mask)
                                                             ▼
-                                               DCT-II synthesis (OLA)
+                                              STFT-256 synthesis (OLA)
                                                             ▼
                                                        enhanced PCM
 ```
@@ -39,7 +39,7 @@ redesigns several components for efficient quantized CPU inference.
 | Component | Details |
 |-----------|---------|
 | Sample rate | 16 kHz |
-| Analysis / synthesis | DCT-II, 512-tap Conv1d filterbank, stride 256, frozen orthogonal basis |
+| Analysis / synthesis | 512-tap Conv1d filterbank, stride 256, frozen at the STFT-256 basis (sqrt-Hann window, real/imag pairs for FFT bins 1..256) |
 | `n_freqs` | 256 |
 | Mic encoder | 5 blocks: 2 → 32 → 40 → 40 → 40 → 40 channels |
 | Far-end encoder | 2 blocks: 2 → 32 → 40 channels |
@@ -53,19 +53,28 @@ redesigns several components for efficient quantized CPU inference.
 | Parameters | ~0.9 M |
 | Receptive field | ≈320 ms (AlignBlock) + conv stack |
 
-### DCT-II Analysis/Synthesis
+### STFT-256 Analysis/Synthesis
 
-The STFT is replaced with a real-valued DCT-II filterbank expressed as a
-frozen `Conv1d(1, 512, kernel_size=512, stride=256)` whose weights are the
-orthogonal DCT-II basis. The output is reshaped to `(B, 256, T, 2)` so the
-downstream convolutional stack sees the familiar "two channels per bin"
-layout of a complex STFT, but every arithmetic operation is real-valued —
-this is the main reason LocalVQE maps cleanly onto GGML without needing
-complex kernels.
+The analysis filterbank is realised as a frozen
+`Conv1d(1, 512, kernel_size=512, stride=256)` whose 512 filters are the
+windowed STFT basis for the lowest 256 FFT bins, packed as
+(real, imag) pairs:
 
-Synthesis uses a learned projection back to 512 samples and a standard
-overlap-add reconstruction. Both filterbanks live *inside* the GGML graph;
-there is no separate Python / C++ feature-extraction pass.
+    W[2k,   :] =  w[n] · cos(2π (k+1) n / N)
+    W[2k+1, :] = -w[n] · sin(2π (k+1) n / N)        for k = 0..255
+
+with `w[n]` the sqrt-Hann analysis window and `N = 512`. DC and Nyquist
+bins are dropped to keep `n_freqs` a power of two. The output is
+reshaped to `(B, 256, T, 2)` — the same layout a complex STFT would
+produce — but every arithmetic operation is real-valued, which is the
+main reason LocalVQE maps cleanly onto GGML without needing complex
+kernels.
+
+Synthesis is a matched filterbank with the inverse-FFT scale `(2/N)`
+times the synthesis sqrt-Hann window baked into the rows; sqrt-Hann
+analysis × sqrt-Hann synthesis at hop `N/2` gives constant overlap-add
+without a separate divisor. Both filterbanks live *inside* the GGML
+graph; there is no separate Python / C++ feature-extraction pass.
 
 ### AlignBlock
 
@@ -111,7 +120,7 @@ Advantages over GRU for this use case:
 
 ### CCM (Complex Convolving Mask)
 
-A 3×3 complex convolving mask applied in the DCT-encoded domain, derived
+A 3×3 complex convolving mask applied in the STFT-encoded domain, derived
 from the NS-only Xiaobin-Rong reference but implemented with real-valued
 arithmetic (two real channels per complex number). This matches the GGML
 data model exactly and avoids any complex-tensor plumbing.
@@ -164,8 +173,8 @@ The published weights were trained with Schedule-Free AdamW
 - **Conv-TasNet**: Luo, Mesgarani. *Conv-TasNet: Surpassing Ideal
   Time-Frequency Magnitude Masking for Speech Separation*. IEEE/ACM TASLP
   2019. [arXiv:1809.07454](https://arxiv.org/abs/1809.07454) — lineage of
-  replacing STFT with a Conv1d filterbank as the analysis front-end; we
-  freeze the basis to the orthogonal DCT-II rather than learning it.
+  expressing the analysis front-end as a Conv1d filterbank; we freeze
+  the basis at the STFT-256 sin/cos pairs rather than learning it.
 - **Sub-pixel convolution**: Shi, Caballero, Huszár, Totz, Aitken, Bishop,
   Rueckert, Wang. *Real-Time Single Image and Video Super-Resolution Using
   an Efficient Sub-Pixel Convolutional Neural Network*. CVPR 2016.
