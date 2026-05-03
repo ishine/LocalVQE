@@ -199,8 +199,9 @@ static void stream_one_frame(localvqe_ctx* ctx, const float* mic,
                         ctx->mic_window.data(), ctx->ref_window.data(),
                         ctx->enh_window.data());
 
-    // OLA: add into accumulator; every interior sample receives exactly
-    // two 512-frame contributions at 50% overlap, so /2 in steady state.
+    // OLA scale below: v1's DCT codec has no analysis window so the two
+    // overlapping frame contributions must be halved; v1.1's sqrt-Hann²
+    // STFT-256 is COLA=1 at hop=N/2, no divisor.
     for (int i = 0; i < n_fft; i++) ctx->ola[i] += ctx->enh_window[i];
 
     if (ctx->frame_count == 0) {
@@ -208,7 +209,7 @@ static void stream_one_frame(localvqe_ctx* ctx, const float* mic,
         // prefix. Mirrors `output[:, self.pad:]` in DCTDecoder.
         std::memset(out, 0, hop * sizeof(float));
     } else {
-        const float scale = 0.5f;
+        const float scale = (hp.version >= 2) ? 1.0f : 0.5f;
         for (int i = 0; i < hop; i++) out[i] = ctx->ola[i] * scale;
         if (ctx->noise_gate_enabled) {
             localvqe::apply_noise_gate(out, hop,
