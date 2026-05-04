@@ -1,5 +1,8 @@
 # LocalVQE
 
+[![Open in Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-md.svg)](https://huggingface.co/spaces/LocalAI-io/LocalVQE-demo)
+[![Model on HF](https://huggingface.co/datasets/huggingface/badges/resolve/main/model-on-hf-md.svg)](https://huggingface.co/LocalAI-io/LocalVQE)
+
 **Local Voice Quality Enhancement** — a compact neural model for joint
 acoustic echo cancellation (AEC), noise suppression, and dereverberation of
 16 kHz speech, designed to run on commodity CPUs in real time.
@@ -9,7 +12,8 @@ acoustic echo cancellation (AEC), noise suppression, and dereverberation of
 - Causal, streaming: 256-sample hop, 16 ms algorithmic latency
 - F32 reference inference in C++ via [GGML](https://github.com/ggml-org/ggml);
   PyTorch reference included for verification and research
-- Apache 2.0
+
+Try it: <https://huggingface.co/spaces/LocalAI-io/LocalVQE-demo>.
 
 LocalVQE is a derivative of **DeepVQE**
 ([Indenbom et al., Interspeech 2023](https://arxiv.org/abs/2306.03177)) —
