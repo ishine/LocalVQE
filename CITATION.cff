@@ -17,8 +17,8 @@ authors:
     website: "https://richiejp.com"
   - name: "Claude (Anthropic)"
     website: "https://www.anthropic.com/claude"
-repository-code: "https://github.com/LocalAI-io/LocalVQE"
-url: "https://github.com/LocalAI-io/LocalVQE"
+repository-code: "https://github.com/localai-org/LocalVQE"
+url: "https://github.com/localai-org/LocalVQE"
 license: Apache-2.0
 keywords:
   - acoustic-echo-cancellation
