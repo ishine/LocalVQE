@@ -227,13 +227,16 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_regression.cpp")
 
     set(_reg_fix    ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
     set(_reg_input  ${_reg_fix}/regression_input.f32)
-    set(_reg_v11    ${_reg_fix}/localvqe-v1.1-1.3M-f32.out.f32)
 
-    add_test(NAME regression_v1.1_f32
-             COMMAND test_regression
-                 --gguf-name localvqe-v1.1-1.3M-f32.gguf
-                 --input    ${_reg_input}
-                 --expected ${_reg_v11})
-    set_tests_properties(regression_v1.1_f32 PROPERTIES
-        SKIP_RETURN_CODE 77)
+    foreach(_v "v1" "v1.1")
+        set(_reg_gguf localvqe-${_v}-1.3M-f32.gguf)
+        set(_reg_out  ${_reg_fix}/localvqe-${_v}-1.3M-f32.out.f32)
+        add_test(NAME regression_${_v}_f32
+                 COMMAND test_regression
+                     --gguf-name ${_reg_gguf}
+                     --input    ${_reg_input}
+                     --expected ${_reg_out})
+        set_tests_properties(regression_${_v}_f32 PROPERTIES
+            SKIP_RETURN_CODE 77)
+    endforeach()
 endif()
