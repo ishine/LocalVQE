@@ -142,6 +142,7 @@ class LocalVQE(nn.Module):
         n_freqs=256,
         kernel_size=(4, 4),
         bottleneck_hidden=162,
+        arch_version=2,
     ):
         super().__init__()
         if mic_channels is None:
@@ -150,7 +151,9 @@ class LocalVQE(nn.Module):
             far_channels = [2, 32, 40]
 
         self.n_freqs = n_freqs
+        self.arch_version = arch_version
         ks = tuple(kernel_size)
+        av = arch_version
 
         self.encoder = DCTEncoder(n_freqs=n_freqs, kernel_size=512, stride=256)
         self.decoder = DCTDecoder(n_freqs=n_freqs, kernel_size=512, stride=256)
@@ -161,12 +164,12 @@ class LocalVQE(nn.Module):
         self.fe_ref = FE(c=power_law_c)
 
         # Mic encoder blocks 1-2
-        self.mic_enc1 = EncoderBlock(mic_channels[0], mic_channels[1], kernel_size=ks)
-        self.mic_enc2 = EncoderBlock(mic_channels[1], mic_channels[2], kernel_size=ks)
+        self.mic_enc1 = EncoderBlock(mic_channels[0], mic_channels[1], kernel_size=ks, arch_version=av)
+        self.mic_enc2 = EncoderBlock(mic_channels[1], mic_channels[2], kernel_size=ks, arch_version=av)
 
         # Far-end encoder blocks 1-2
-        self.far_enc1 = EncoderBlock(far_channels[0], far_channels[1], kernel_size=ks)
-        self.far_enc2 = EncoderBlock(far_channels[1], far_channels[2], kernel_size=ks)
+        self.far_enc1 = EncoderBlock(far_channels[0], far_channels[1], kernel_size=ks, arch_version=av)
+        self.far_enc2 = EncoderBlock(far_channels[1], far_channels[2], kernel_size=ks, arch_version=av)
 
         # Alignment
         self.align = AlignBlock(
@@ -176,9 +179,9 @@ class LocalVQE(nn.Module):
         )
 
         # Mic encoder blocks 3-5 (block 3 takes concat: 128+128=256)
-        self.mic_enc3 = EncoderBlock(mic_channels[2] * 2, mic_channels[3], kernel_size=ks)
-        self.mic_enc4 = EncoderBlock(mic_channels[3], mic_channels[4], kernel_size=ks)
-        self.mic_enc5 = EncoderBlock(mic_channels[4], mic_channels[5], kernel_size=ks)
+        self.mic_enc3 = EncoderBlock(mic_channels[2] * 2, mic_channels[3], kernel_size=ks, arch_version=av)
+        self.mic_enc4 = EncoderBlock(mic_channels[3], mic_channels[4], kernel_size=ks, arch_version=av)
+        self.mic_enc5 = EncoderBlock(mic_channels[4], mic_channels[5], kernel_size=ks, arch_version=av)
 
         # Bottleneck: channels * freq_bins at deepest encoder stage
         freqs = compute_freq_progression(n_freqs, ks)
@@ -187,11 +190,11 @@ class LocalVQE(nn.Module):
         self.bottleneck = S4DBottleneck(bn_input, bn_hidden)
 
         # Decoder blocks (mirror encoder)
-        self.dec5 = DecoderBlock(mic_channels[5], mic_channels[4], kernel_size=ks)
-        self.dec4 = DecoderBlock(mic_channels[4], mic_channels[3], kernel_size=ks)
-        self.dec3 = DecoderBlock(mic_channels[3], mic_channels[2], kernel_size=ks)
-        self.dec2 = DecoderBlock(mic_channels[2], mic_channels[1], kernel_size=ks)
-        self.dec1 = DecoderBlock(mic_channels[1], 27, kernel_size=ks, is_last=True)
+        self.dec5 = DecoderBlock(mic_channels[5], mic_channels[4], kernel_size=ks, arch_version=av)
+        self.dec4 = DecoderBlock(mic_channels[4], mic_channels[3], kernel_size=ks, arch_version=av)
+        self.dec3 = DecoderBlock(mic_channels[3], mic_channels[2], kernel_size=ks, arch_version=av)
+        self.dec2 = DecoderBlock(mic_channels[2], mic_channels[1], kernel_size=ks, arch_version=av)
+        self.dec1 = DecoderBlock(mic_channels[1], 27, kernel_size=ks, is_last=True, arch_version=av)
         self.mask = CCM()
         self._init_ccm_identity()
 
@@ -288,4 +291,5 @@ class LocalVQE(nn.Module):
             n_freqs=cfg.audio.n_freqs,
             kernel_size=cfg.model.kernel_size,
             bottleneck_hidden=cfg.model.bottleneck_hidden,
+            arch_version=getattr(cfg.model, "arch_version", 2),
         )

@@ -5,6 +5,11 @@
 # training-side settings live in the (private) training repository.
 
 model:
+  # arch_version mirrors the GGUF `localvqe.version` field:
+  #   1 = legacy: post-conv BatchNorm + ELU
+  #   2 = current (v1.1+): pre-norm CausalGroupNorm + ReLU6 with skip_norm
+  # The published localvqe-v1.1-1.3M.pt requires arch_version: 2.
+  arch_version: 2
   mic_channels: [2, 32, 40, 40, 40, 40]
   far_channels: [2, 32, 40]
   align_hidden: 32

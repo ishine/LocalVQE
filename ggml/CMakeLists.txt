@@ -216,3 +216,24 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/eval_graph.cpp" AND SNDFILE_FOUND)
     add_executable(eval_graph eval_graph.cpp localvqe_api.cpp)
     target_link_libraries(eval_graph PRIVATE dvqe_graph dvqe_audio_io)
 endif()
+
+# End-to-end regression test (no audio file deps — uses raw .f32 fixtures
+# in tests/fixtures/). SKIPS at runtime when the .gguf isn't present, so
+# CTest is happy even without bench-assets downloaded.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_regression.cpp")
+    enable_testing()
+    add_executable(test_regression tests/test_regression.cpp localvqe_api.cpp)
+    target_link_libraries(test_regression PRIVATE dvqe_graph)
+
+    set(_reg_fix    ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
+    set(_reg_input  ${_reg_fix}/regression_input.f32)
+    set(_reg_v11    ${_reg_fix}/localvqe-v1.1-1.3M-f32.out.f32)
+
+    add_test(NAME regression_v1.1_f32
+             COMMAND test_regression
+                 --gguf-name localvqe-v1.1-1.3M-f32.gguf
+                 --input    ${_reg_input}
+                 --expected ${_reg_v11})
+    set_tests_properties(regression_v1.1_f32 PROPERTIES
+        SKIP_RETURN_CODE 77)
+endif()

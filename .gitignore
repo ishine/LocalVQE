@@ -13,6 +13,11 @@ __pycache__/
 *.pt
 *.bin
 
+# Test fixtures live under tests/ — keep them tracked despite the
+# weight-binary patterns above.
+!pytorch/tests/fixtures/*.pt
+!ggml/tests/fixtures/*.f32
+
 # Generated audio
 *.wav
 

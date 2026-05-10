@@ -55,3 +55,34 @@ configs/
 
 Only the model definition is included here; no training, loss, or data
 pipeline code ships in this repository.
+
+## Architecture versions
+
+`configs/default.yaml` carries an `arch_version` field that mirrors the
+GGUF `localvqe.version` metadata key:
+
+| `arch_version` | Norm + activation | Matches |
+|---|---|---|
+| `2` (default) | pre-norm `CausalGroupNorm` + `ReLU6`, decoder `skip_norm`, `SubpixelConv2d.norm` | `localvqe-v1.1-1.3M.pt` (published) |
+| `1` | post-conv `BatchNorm2d` + `ELU` (legacy) | pre-v1.1 PyTorch checkpoints / `localvqe-v1-1.3M-f32.gguf` |
+
+Pass `arch_version=1` (or set it in the config) to load a legacy
+checkpoint; the default loads the current published `.pt`.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/
+```
+
+`tests/test_architecture.py` runs without any checkpoint files and
+verifies the state_dict layout for both `arch_version` values plus a
+random-weight forward pass.
+
+`tests/test_checkpoints.py` regression-tests every published checkpoint
+listed in `tests/manifest.yaml` against a committed reference output.
+Point `LOCALVQE_CKPT_DIR` at the directory containing the `.pt` files
+(or drop them in `pytorch/checkpoints/`); the test skips cleanly when a
+checkpoint is absent. To add a new checkpoint, append it to
+`manifest.yaml` and run `python tests/regenerate_fixtures.py`.

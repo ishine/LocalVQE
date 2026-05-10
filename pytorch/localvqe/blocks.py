@@ -5,6 +5,14 @@ import torch.nn as nn
 from einops import rearrange
 
 
+# Architecture versions (mirrors `localvqe.version` in GGUF metadata, see
+# ggml/localvqe_model.h):
+#   1 = post-conv BatchNorm2d + ELU (legacy v1).
+#   2 = pre-norm CausalGroupNorm + ReLU6 with skip_norm on the decoder
+#       skip path and an internal norm in SubpixelConv2d (v1.1 onward,
+#       matches localvqe-v1.1-1.3M.pt published on Hugging Face).
+
+
 def causal_pad(kernel_size):
     """Compute ZeroPad2d args for causal convolution.
 
@@ -15,6 +23,35 @@ def causal_pad(kernel_size):
     pad_left = (kw - 1) // 2
     pad_right = kw - 1 - pad_left
     return (pad_left, pad_right, kh - 1, 0)
+
+
+class CausalGroupNorm(nn.Module):
+    """GroupNorm-like norm that is causal across the time axis.
+
+    nn.GroupNorm(C, C) on a (B, C, T, F) tensor reduces across (C, T, F)
+    per sample, making the normalization at frame t depend on frames
+    > t — fatal for streaming inference. CausalGroupNorm reduces across
+    (C, F) per (B, T) instead, so each frame's stats depend only on
+    that frame. Equivalent to nn.LayerNorm([C, F]) when F is fixed,
+    but F changes across encoder/decoder stages so we compute the
+    reduction explicitly. Matches the GGML graph's
+    build_causal_groupnorm.
+    """
+
+    def __init__(self, num_channels: int, eps: float = 1e-5):
+        super().__init__()
+        self.num_channels = num_channels
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(num_channels))
+        self.bias = nn.Parameter(torch.zeros(num_channels))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 4:
+            raise ValueError(f"CausalGroupNorm expects 4-D input, got ndim={x.ndim}")
+        mean = x.mean(dim=(1, 3), keepdim=True)
+        var = x.var(dim=(1, 3), keepdim=True, unbiased=False)
+        x = (x - mean) * torch.rsqrt(var + self.eps)
+        return x * self.weight.view(1, -1, 1, 1) + self.bias.view(1, -1, 1, 1)
 
 
 class FE(nn.Module):
@@ -36,29 +73,54 @@ class FE(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, channels, kernel_size=(4, 3)):
+    """v1: pad → conv → BN → ELU + skip.
+    v2: norm → pad → conv → ReLU6 + skip (pre-norm)."""
+
+    def __init__(self, channels, kernel_size=(4, 3), arch_version=2):
         super().__init__()
+        self.arch_version = arch_version
         self.pad = nn.ZeroPad2d(causal_pad(kernel_size))
         self.conv = nn.Conv2d(channels, channels, kernel_size=kernel_size)
-        self.bn = nn.BatchNorm2d(channels)
-        self.elu = nn.ELU()
+        if arch_version == 1:
+            self.bn = nn.BatchNorm2d(channels)
+            self.elu = nn.ELU()
+        elif arch_version == 2:
+            self.norm = CausalGroupNorm(channels)
+            self.act = nn.ReLU6()
+        else:
+            raise ValueError(f"Unsupported arch_version={arch_version}")
 
     def forward(self, x):
-        """x: (B,C,T,F)"""
-        return self.elu(self.bn(self.conv(self.pad(x)))) + x
+        if self.arch_version == 1:
+            return self.elu(self.bn(self.conv(self.pad(x)))) + x
+        return self.act(self.conv(self.pad(self.norm(x)))) + x
 
 
 class EncoderBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=(4, 3), stride=(1, 2)):
+    """v1: pad → conv (stride=(1,2)) → BN → ELU → ResidualBlock.
+    v2: norm → pad → conv (stride=(1,2)) → ReLU6 → ResidualBlock."""
+
+    def __init__(self, in_channels, out_channels, kernel_size=(4, 3), stride=(1, 2),
+                 arch_version=2):
         super().__init__()
+        self.arch_version = arch_version
         self.pad = nn.ZeroPad2d(causal_pad(kernel_size))
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride)
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.elu = nn.ELU()
-        self.resblock = ResidualBlock(out_channels, kernel_size=kernel_size)
+        if arch_version == 1:
+            self.bn = nn.BatchNorm2d(out_channels)
+            self.elu = nn.ELU()
+        elif arch_version == 2:
+            self.norm = CausalGroupNorm(in_channels)
+            self.act = nn.ReLU6()
+        else:
+            raise ValueError(f"Unsupported arch_version={arch_version}")
+        self.resblock = ResidualBlock(out_channels, kernel_size=kernel_size,
+                                      arch_version=arch_version)
 
     def forward(self, x):
-        return self.resblock(self.elu(self.bn(self.conv(self.pad(x)))))
+        if self.arch_version == 1:
+            return self.resblock(self.elu(self.bn(self.conv(self.pad(x)))))
+        return self.resblock(self.act(self.conv(self.pad(self.norm(x)))))
 
 
 class S4DBottleneck(nn.Module):
@@ -152,36 +214,62 @@ class S4DBottleneck(nn.Module):
 
 
 class SubpixelConv2d(nn.Module):
-    """Upsamples frequency dimension by 2x via sub-pixel shuffle."""
+    """v1: pad → conv → reshape (×2 freq).
+    v2: norm → pad → conv → reshape (×2 freq) (pre-norm)."""
 
-    def __init__(self, in_channels, out_channels, kernel_size=(4, 3)):
+    def __init__(self, in_channels, out_channels, kernel_size=(4, 3), arch_version=2):
         super().__init__()
+        self.arch_version = arch_version
+        if arch_version == 2:
+            self.norm = CausalGroupNorm(in_channels)
+        elif arch_version != 1:
+            raise ValueError(f"Unsupported arch_version={arch_version}")
         self.pad = nn.ZeroPad2d(causal_pad(kernel_size))
         self.conv = nn.Conv2d(in_channels, out_channels * 2, kernel_size)
 
     def forward(self, x):
+        if self.arch_version == 2:
+            x = self.norm(x)
         y = self.conv(self.pad(x))
         y = rearrange(y, "b (r c) t f -> b c t (r f)", r=2)
         return y
 
 
 class DecoderBlock(nn.Module):
+    """v1: skip_conv(x_en) + x → resblock → deconv → BN+ELU (if not last).
+    v2: skip_norm → skip_conv → +x → resblock → deconv → ReLU6 (if not last)."""
+
     def __init__(self, in_channels, out_channels, kernel_size=(4, 3), is_last=False,
-                 enc_channels=None):
+                 enc_channels=None, arch_version=2):
         super().__init__()
+        self.arch_version = arch_version
         if enc_channels is None:
             enc_channels = in_channels
+        if arch_version == 2:
+            self.skip_norm = CausalGroupNorm(enc_channels)
+        elif arch_version != 1:
+            raise ValueError(f"Unsupported arch_version={arch_version}")
         self.skip_conv = nn.Conv2d(enc_channels, in_channels, 1)
-        self.resblock = ResidualBlock(in_channels, kernel_size=kernel_size)
-        self.deconv = SubpixelConv2d(in_channels, out_channels, kernel_size)
+        self.resblock = ResidualBlock(in_channels, kernel_size=kernel_size,
+                                      arch_version=arch_version)
+        self.deconv = SubpixelConv2d(in_channels, out_channels, kernel_size,
+                                     arch_version=arch_version)
         self.is_last = is_last
         if not is_last:
-            self.bn = nn.BatchNorm2d(out_channels)
-            self.elu = nn.ELU()
+            if arch_version == 1:
+                self.bn = nn.BatchNorm2d(out_channels)
+                self.elu = nn.ELU()
+            else:
+                self.act = nn.ReLU6()
 
     def forward(self, x, x_en):
+        if self.arch_version == 2:
+            x_en = self.skip_norm(x_en)
         y = x + self.skip_conv(x_en)
         y = self.deconv(self.resblock(y))
         if not self.is_last:
-            y = self.elu(self.bn(y))
+            if self.arch_version == 1:
+                y = self.elu(self.bn(y))
+            else:
+                y = self.act(y)
         return y

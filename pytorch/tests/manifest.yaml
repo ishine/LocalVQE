@@ -1,0 +1,20 @@
+# Checkpoint regression manifest.
+#
+# One entry per published checkpoint that the PyTorch reference must
+# remain compatible with. To add a new checkpoint:
+#   1. Add an entry here with its filename, SHA256, and arch_version.
+#   2. Run tests/regenerate_fixtures.py to produce the reference output.
+#   3. Commit the resulting fixtures/<name>.out.pt.
+#
+# Tests look for each `filename` under $LOCALVQE_CKPT_DIR (or
+# pytorch/checkpoints/) and skip cleanly when the file is absent.
+
+checkpoints:
+  - name: localvqe-v1.1-1.3M
+    filename: localvqe-v1.1-1.3M.pt
+    sha256: 76aabaa3bca3a9d7989463226312aa2344f978403c3e0e007e58a15922c97707
+    arch_version: 2
+    state_dict_key: model_state_dict
+    fold_temperature: true
+    reference_output: localvqe-v1.1-1.3M.out.pt
+    # Hugging Face: https://huggingface.co/LocalAI-io/LocalVQE

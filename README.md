@@ -285,6 +285,28 @@ cmake --build ggml/build -j$(nproc)
 Produces `liblocalvqe.so` with the API in `ggml/localvqe_api.h`. See
 `ggml/example_purego_test.go` for a Go / `purego` integration.
 
+### Regression test
+
+`ggml/tests/test_regression.cpp` is an end-to-end check: it runs
+`localvqe_process_f32` on a fixed seeded input through a published
+`.gguf` and compares against a committed reference output, mirroring
+the PyTorch suite under `pytorch/tests/`. Run it through CTest:
+
+```bash
+cmake --build ggml/build --target test_regression
+ctest --test-dir ggml/build --output-on-failure
+```
+
+The test SKIPs cleanly when no `.gguf` is available — it looks under
+`$LOCALVQE_GGUF_DIR`, then `<build>/bench_assets/` (populated by
+`make bench-assets`). To refresh the reference output after an
+intentional change to the graph:
+
+```bash
+python ggml/tests/regenerate_fixtures.py \
+    --gguf ggml/build/bench_assets/localvqe-v1.1-1.3M-f32.gguf
+```
+
 ### Quantizing (experimental)
 
 Calibrated Q4_K / Q8_0 weights are not yet published. The `quantize`
