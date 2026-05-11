@@ -82,7 +82,27 @@ random-weight forward pass.
 
 `tests/test_checkpoints.py` regression-tests every published checkpoint
 listed in `tests/manifest.yaml` against a committed reference output.
-Point `LOCALVQE_CKPT_DIR` at the directory containing the `.pt` files
-(or drop them in `pytorch/checkpoints/`); the test skips cleanly when a
-checkpoint is absent. To add a new checkpoint, append it to
-`manifest.yaml` and run `python tests/regenerate_fixtures.py`.
+The test skips cleanly when a checkpoint is absent, so the suite still
+passes on machines without network access. To run against the actual
+published weights, fetch them from Hugging Face first
+(SHA256-verified, mirror of the GGML side's `regression-assets`):
+
+```bash
+python tests/fetch_checkpoints.py    # → pytorch/checkpoints/*.pt
+pytest tests/
+```
+
+Override the destination with `LOCALVQE_CKPT_DIR=/path/to/dir` or
+`--dest`. Existing files are kept as-is when their SHA matches the
+manifest.
+
+`tests/test_arch_snapshots.py` is a checkpoint-free numerical-drift
+guard: it builds a model with `torch.manual_seed(1234)` for each
+`arch_version`, runs forward on the deterministic input shared with
+the GGML side, and compares against a committed snapshot. The only
+forward-output coverage `arch_version=1` has, since no v1 PyTorch
+checkpoint was ever published.
+
+To add a new checkpoint to the regression suite: append an entry to
+`manifest.yaml` (with `url` and `sha256`) and run
+`python tests/regenerate_fixtures.py` to produce the reference output.

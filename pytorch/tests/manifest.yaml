@@ -12,9 +12,9 @@
 checkpoints:
   - name: localvqe-v1.1-1.3M
     filename: localvqe-v1.1-1.3M.pt
+    url: https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1.1-1.3M.pt
     sha256: 76aabaa3bca3a9d7989463226312aa2344f978403c3e0e007e58a15922c97707
     arch_version: 2
     state_dict_key: model_state_dict
     fold_temperature: true
     reference_output: localvqe-v1.1-1.3M.out.pt
-    # Hugging Face: https://huggingface.co/LocalAI-io/LocalVQE
