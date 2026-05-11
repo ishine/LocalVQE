@@ -288,19 +288,21 @@ Produces `liblocalvqe.so` with the API in `ggml/localvqe_api.h`. See
 ### Regression test
 
 `ggml/tests/test_regression.cpp` is an end-to-end check: it runs
-`localvqe_process_f32` on a fixed seeded input through a published
+`localvqe_process_f32` on a fixed seeded input through each published
 `.gguf` and compares against a committed reference output, mirroring
-the PyTorch suite under `pytorch/tests/`. Run it through CTest:
+the PyTorch suite under `pytorch/tests/`. Build, fetch both released
+GGUFs from HuggingFace, and run via CTest:
 
 ```bash
-cmake --build ggml/build --target test_regression
+cmake --build ggml/build --target test_regression regression-assets
 ctest --test-dir ggml/build --output-on-failure
 ```
 
-The test SKIPs cleanly when no `.gguf` is available — it looks under
-`$LOCALVQE_GGUF_DIR`, then `<build>/bench_assets/` (populated by
-`make bench-assets`). To refresh the reference output after an
-intentional change to the graph:
+`regression-assets` reuses the same SHA256-verified download path as
+`bench-assets`. Missing GGUFs make the corresponding test entry SKIP
+rather than fail, so CI without network access still runs cleanly.
+
+To refresh a reference output after an intentional graph change:
 
 ```bash
 python ggml/tests/regenerate_fixtures.py \

@@ -130,6 +130,36 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_noise_gate.cpp")
     add_executable(test_noise_gate test_noise_gate.cpp)
 endif()
 
+# Shared HuggingFace-asset download infrastructure. Used by bench (model
+# + WAVs) and the regression test (model only). Lives outside the
+# SNDFILE_FOUND block so the regression target works on minimal CI
+# images that don't ship libsndfile.
+set(_assets_dir ${CMAKE_BINARY_DIR}/bench_assets)
+set(_dl_script  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/download_asset.cmake)
+set(_gguf_v1    ${_assets_dir}/localvqe-v1-1.3M-f32.gguf)
+set(_gguf_v11   ${_assets_dir}/localvqe-v1.1-1.3M-f32.gguf)
+file(MAKE_DIRECTORY ${_assets_dir})
+
+function(_dvqe_download OUTFILE URL SHA COMMENT_TEXT)
+    add_custom_command(OUTPUT ${OUTFILE}
+        COMMAND ${CMAKE_COMMAND}
+            -DURL=${URL}
+            -DOUTFILE=${OUTFILE}
+            -DEXPECTED_SHA256=${SHA}
+            -P ${_dl_script}
+        COMMENT "${COMMENT_TEXT}"
+        VERBATIM)
+endfunction()
+
+_dvqe_download(${_gguf_v1}
+    https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1-1.3M-f32.gguf
+    d5eaf577449d0f920d8ee5e1042b8ddc7b6627313a042c62e2ada1b42719ab30
+    "Fetching LocalVQE v1 F32 model from HuggingFace")
+_dvqe_download(${_gguf_v11}
+    https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1.1-1.3M-f32.gguf
+    c118227c6b433d6aa36d9e4b993e0f31aa60787ea38d301d04db917a4a2b0a84
+    "Fetching LocalVQE v1.1 F32 model from HuggingFace")
+
 # Benchmark (uses C API + WAV I/O)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp" AND SNDFILE_FOUND)
     add_executable(bench bench.cpp localvqe_api.cpp)
@@ -138,29 +168,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp" AND SNDFILE_FOUND)
     # `bench-run` — build bench, fetch the released F32 model + a doubletalk
     # mic/ref WAV pair from HuggingFace, and run the benchmark. Intended for
     # turnkey use on a fresh machine.
-    set(_bench_dir   ${CMAKE_BINARY_DIR}/bench_assets)
-    set(_bench_model ${_bench_dir}/localvqe-v1-1.3M-f32.gguf)
-    set(_bench_mic   ${_bench_dir}/dt_mic.wav)
-    set(_bench_ref   ${_bench_dir}/dt_ref.wav)
-    set(_dl_script   ${CMAKE_CURRENT_SOURCE_DIR}/cmake/download_asset.cmake)
+    set(_bench_mic ${_assets_dir}/dt_mic.wav)
+    set(_bench_ref ${_assets_dir}/dt_ref.wav)
 
-    file(MAKE_DIRECTORY ${_bench_dir})
-
-    function(_dvqe_download OUTFILE URL SHA COMMENT_TEXT)
-        add_custom_command(OUTPUT ${OUTFILE}
-            COMMAND ${CMAKE_COMMAND}
-                -DURL=${URL}
-                -DOUTFILE=${OUTFILE}
-                -DEXPECTED_SHA256=${SHA}
-                -P ${_dl_script}
-            COMMENT "${COMMENT_TEXT}"
-            VERBATIM)
-    endfunction()
-
-    _dvqe_download(${_bench_model}
-        https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1-1.3M-f32.gguf
-        d5eaf577449d0f920d8ee5e1042b8ddc7b6627313a042c62e2ada1b42719ab30
-        "Fetching LocalVQE F32 model from HuggingFace")
     _dvqe_download(${_bench_mic}
         https://huggingface.co/spaces/LocalAI-io/LocalVQE-demo/resolve/main/examples/dt_mic.wav
         8d0c15e56a4c7f387847451952123e8f23161520e81c1ba8878c922f11592a62
@@ -171,7 +181,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp" AND SNDFILE_FOUND)
         "Fetching doubletalk reference WAV")
 
     add_custom_target(bench-assets
-        DEPENDS ${_bench_model} ${_bench_mic} ${_bench_ref})
+        DEPENDS ${_gguf_v1} ${_bench_mic} ${_bench_ref})
 
     set(BENCH_ITERS 10 CACHE STRING "Iterations for the bench-run target")
     set(BENCH_BACKEND "CPU"
@@ -180,21 +190,21 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp" AND SNDFILE_FOUND)
         CACHE STRING "Device index for bench-run (per-backend, see bench-list-devices)")
     add_custom_target(bench-run
         COMMAND $<TARGET_FILE:bench>
-            ${_bench_model}
+            ${_gguf_v1}
             --backend ${BENCH_BACKEND}
             --device  ${BENCH_DEVICE}
             --in-wav ${_bench_mic} ${_bench_ref}
             --iters ${BENCH_ITERS}
             --profile
         DEPENDS bench bench-assets
-        WORKING_DIRECTORY ${_bench_dir}
+        WORKING_DIRECTORY ${_assets_dir}
         USES_TERMINAL
         VERBATIM)
 
     add_custom_target(bench-list-devices
         COMMAND $<TARGET_FILE:bench> --list-devices
         DEPENDS bench
-        WORKING_DIRECTORY ${_bench_dir}
+        WORKING_DIRECTORY ${_assets_dir}
         USES_TERMINAL
         VERBATIM)
 endif()
@@ -219,11 +229,15 @@ endif()
 
 # End-to-end regression test (no audio file deps — uses raw .f32 fixtures
 # in tests/fixtures/). SKIPS at runtime when the .gguf isn't present, so
-# CTest is happy even without bench-assets downloaded.
+# CTest is happy even without assets downloaded. The `regression-assets`
+# target fetches both GGUFs from HuggingFace; after that, ctest runs
+# both entries.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_regression.cpp")
     enable_testing()
     add_executable(test_regression tests/test_regression.cpp localvqe_api.cpp)
     target_link_libraries(test_regression PRIVATE dvqe_graph)
+
+    add_custom_target(regression-assets DEPENDS ${_gguf_v1} ${_gguf_v11})
 
     set(_reg_fix    ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
     set(_reg_input  ${_reg_fix}/regression_input.f32)
@@ -237,6 +251,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_regression.cpp")
                      --input    ${_reg_input}
                      --expected ${_reg_out})
         set_tests_properties(regression_${_v}_f32 PROPERTIES
-            SKIP_RETURN_CODE 77)
+            SKIP_RETURN_CODE 77
+            ENVIRONMENT "LOCALVQE_GGUF_DIR=${_assets_dir}")
     endforeach()
 endif()
