@@ -43,7 +43,7 @@ def _build_model(arch_version: int, pytorch_dir: Path) -> LocalVQE:
     return LocalVQE(**model_kwargs, n_freqs=cfg["audio"]["n_freqs"]).eval()
 
 
-@pytest.mark.parametrize("arch_version", [1, 2])
+@pytest.mark.parametrize("arch_version", [1, 2, 3])
 def test_arch_forward_snapshot(arch_version, pytorch_dir, fixtures_dir):
     model = _build_model(arch_version, pytorch_dir)
     mic, ref = _deterministic_input()

@@ -137,12 +137,12 @@ class LocalVQE(nn.Module):
         mic_channels=None,
         far_channels=None,
         align_hidden=32,
-        dmax=32,
+        dmax=64,
         power_law_c=0.3,
         n_freqs=256,
         kernel_size=(4, 4),
         bottleneck_hidden=162,
-        arch_version=2,
+        arch_version=3,
     ):
         super().__init__()
         if mic_channels is None:

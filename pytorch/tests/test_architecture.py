@@ -8,6 +8,7 @@ that drops/renames/adds a parameter will fail one of these tests.
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 import pytest
 import torch
@@ -111,13 +112,19 @@ def test_forward_finite(arch_version, pytorch_dir):
 
 
 def test_arch_version_default_matches_published_checkpoint():
-    """If someone bumps the default in LocalVQE.__init__ we want a
-    failing test, because the default.yaml and the published .pt
-    metadata both target arch_version=2."""
+    """Tripwire: LocalVQE.__init__'s default `arch_version` and `dmax`
+    must track the current published checkpoint (default.yaml is the
+    source of truth). If you're rolling a new release, bump the
+    constructor defaults and this assertion together."""
     import inspect
     sig = inspect.signature(LocalVQE.__init__)
-    default = sig.parameters["arch_version"].default
-    assert default == 2, (
-        f"LocalVQE default arch_version is {default}, expected 2 to match "
-        "the published localvqe-v1.1-1.3M.pt checkpoint."
-    )
+    cfg = yaml.safe_load(
+        (Path(__file__).resolve().parent.parent / "configs" / "default.yaml").read_text()
+    )["model"]
+    for key in ("arch_version", "dmax"):
+        actual = sig.parameters[key].default
+        expected = cfg[key]
+        assert actual == expected, (
+            f"LocalVQE.__init__ default {key}={actual} disagrees with "
+            f"configs/default.yaml {key}={expected}."
+        )

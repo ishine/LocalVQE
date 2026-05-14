@@ -44,7 +44,7 @@ _INPUT_SEED = 20260510
 _INPUT_LEN = 16000
 _INIT_SEED = 1234
 
-ARCH_VERSIONS = (1, 2)
+ARCH_VERSIONS = (1, 2, 3)
 
 
 def _deterministic_input():
@@ -102,6 +102,11 @@ def main():
                 continue
 
             model_kwargs = dict(cfg["model"])
+            # Manifest entries pin per-checkpoint geometry (arch_version,
+            # dmax, ...). Apply any overlap with default.yaml's model keys.
+            for k, v in entry.items():
+                if k in model_kwargs:
+                    model_kwargs[k] = v
             model_kwargs["arch_version"] = entry["arch_version"]
             model = LocalVQE(**model_kwargs, n_freqs=cfg["audio"]["n_freqs"]).eval()
 
