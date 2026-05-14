@@ -788,17 +788,32 @@ static struct ggml_tensor* build_causal_groupnorm(
 }
 
 // ReLU6: clamp(x, 0, 6). Bounded activation makes INT8 quantisation α
-// analytical (= 6/127) and removes outlier-driven scale drift.
+// analytical (= 6/127) and removes outlier-driven scale drift. Used by v1.1.
 static inline struct ggml_tensor* build_relu6(struct ggml_context* ctx,
                                               struct ggml_tensor* x) {
     return ggml_clamp(ctx, x, 0.0f, 6.0f);
 }
 
-// v1.1 streaming encoder block: pre-norm + conv + ReLU6, with a residual
-// sub-block that is itself pre-normed:
-//   y = ReLU6(conv_main(pad(norm_main(x))))            stride 2 in F
-//   res = ReLU6(conv_res(pad(norm_res(y))))            stride 1
+// v1.2 onward uses SiLU (smooth, gradient-everywhere). Pre-norm bounds the
+// input so quantisation α stays well-conditioned despite the unbounded
+// activation range.
+enum class lvq_activation { RELU6, SILU };
+
+static inline struct ggml_tensor* build_act(struct ggml_context* ctx,
+                                            struct ggml_tensor* x,
+                                            lvq_activation act) {
+    if (act == lvq_activation::SILU) {
+        return ggml_silu(ctx, x);
+    }
+    return build_relu6(ctx, x);
+}
+
+// v1.1+ streaming encoder block: pre-norm + conv + activation, with a
+// residual sub-block that is itself pre-normed:
+//   y = act(conv_main(pad(norm_main(x))))              stride 2 in F
+//   res = act(conv_res(pad(norm_res(y))))              stride 1
 //   out = res + y
+// Activation is ReLU6 for version=2 (v1.1) or SiLU for version>=3 (v1.2).
 static struct ggml_tensor* build_encoder_block_s_v11(
     struct ggml_context* ctx,
     dvqe_stream_graph& sg,
@@ -806,17 +821,18 @@ static struct ggml_tensor* build_encoder_block_s_v11(
     struct ggml_tensor* norm_w,    struct ggml_tensor* norm_b,
     struct ggml_tensor* conv_w,    struct ggml_tensor* conv_b,
     struct ggml_tensor* res_norm_w,struct ggml_tensor* res_norm_b,
-    struct ggml_tensor* res_w,     struct ggml_tensor* res_b
+    struct ggml_tensor* res_w,     struct ggml_tensor* res_b,
+    lvq_activation act
 ) {
     struct ggml_tensor* xn = build_causal_groupnorm(ctx, x, norm_w, norm_b);
     struct ggml_tensor* y = build_causal_conv_s(ctx, sg, xn, conv_w, conv_b, 2);
-    y = build_relu6(ctx, y);
+    y = build_act(ctx, y, act);
     y = ggml_reshape_3d(ctx, y, y->ne[0], y->ne[1], y->ne[2]);
 
     struct ggml_tensor* yn = build_causal_groupnorm(ctx, y, res_norm_w, res_norm_b);
     struct ggml_tensor* res = build_causal_conv_s(ctx, sg, yn, res_w, res_b, 1);
     res = ggml_reshape_3d(ctx, res, res->ne[0], res->ne[1], res->ne[2]);
-    res = ggml_add(ctx, build_relu6(ctx, res), y);
+    res = ggml_add(ctx, build_act(ctx, res, act), y);
 
     return res;
 }
@@ -1055,12 +1071,13 @@ static struct ggml_tensor* build_decoder_block_s(
     return shuffled;
 }
 
-// v1.1 streaming decoder block:
+// v1.1+ streaming decoder block:
 //   skip_proj = skip_conv(skip_norm(x_en))
 //   y = x + skip_proj
-//   y = y + ReLU6(conv_res(norm_res(y)))             ResidualBlock
+//   y = y + act(conv_res(norm_res(y)))               ResidualBlock
 //   y = pixel_shuffle(conv_dec(norm_dec(y)))         SubpixelConv2d
-//   if not last: y = ReLU6(y)                        (no ChannelAffine)
+//   if not last: y = act(y)                          (no ChannelAffine)
+// Activation is ReLU6 for version=2 (v1.1) or SiLU for version>=3 (v1.2).
 static struct ggml_tensor* build_decoder_block_s_v11(
     struct ggml_context* ctx,
     dvqe_stream_graph& sg,
@@ -1072,7 +1089,8 @@ static struct ggml_tensor* build_decoder_block_s_v11(
     struct ggml_tensor* res_w,         struct ggml_tensor* res_b,
     struct ggml_tensor* deconv_norm_w, struct ggml_tensor* deconv_norm_b,
     struct ggml_tensor* deconv_w,      struct ggml_tensor* deconv_b,
-    bool is_last
+    bool is_last,
+    lvq_activation act
 ) {
     int64_t F = x->ne[0], C = x->ne[2];
 
@@ -1094,7 +1112,7 @@ static struct ggml_tensor* build_decoder_block_s_v11(
     struct ggml_tensor* yn = build_causal_groupnorm(ctx, y, res_norm_w, res_norm_b);
     struct ggml_tensor* res = build_causal_conv_s(ctx, sg, yn, res_w, res_b, 1);
     res = ggml_reshape_3d(ctx, res, F, 1, C);
-    res = ggml_add(ctx, build_relu6(ctx, res), y);
+    res = ggml_add(ctx, build_act(ctx, res, act), y);
 
     // SubpixelConv2d with internal pre-norm.
     int64_t C_out = deconv_w->ne[3] / 2;
@@ -1109,7 +1127,7 @@ static struct ggml_tensor* build_decoder_block_s_v11(
     struct ggml_tensor* shuffled = ggml_reshape_3d(ctx, ggml_cont(ctx, r2), 2 * F, 1, C_out);
 
     if (!is_last) {
-        shuffled = build_relu6(ctx, shuffled);
+        shuffled = build_act(ctx, shuffled, act);
     }
     return shuffled;
 }
@@ -1245,11 +1263,15 @@ bool build_stream_graph(dvqe_graph_model& m, dvqe_stream_graph& sg) {
 
     // 2-3. Encoder blocks.
     //
-    // v1: post-conv BN folded into conv weights, ELU activation. The block
-    //     builder takes only main + residual conv tensors.
-    // v1.1: pre-norm CausalGroupNorm + ReLU6. The block builder also takes
-    //     two extra norm tensor pairs (one for main, one for residual).
+    // v1   (version=1): post-conv BN folded into conv weights, ELU activation.
+    //                   Builder takes only main + residual conv tensors.
+    // v1.1 (version=2): pre-norm CausalGroupNorm + ReLU6. Builder takes two
+    //                   extra norm tensor pairs (one for main, one for res).
+    // v1.2 (version=3): same structure as v1.1, SiLU activation.
     const bool is_v11 = (m.hparams.version >= 2);
+    const lvq_activation act = (m.hparams.version >= 3)
+        ? lvq_activation::SILU
+        : lvq_activation::RELU6;
     auto enc = [&](struct ggml_tensor* x, const char* prefix) -> struct ggml_tensor* {
         std::string p = prefix;
         if (is_v11) {
@@ -1261,7 +1283,8 @@ bool build_stream_graph(dvqe_graph_model& m, dvqe_stream_graph& sg) {
                 m.w((p + ".resblock.norm.weight").c_str()),
                 m.w((p + ".resblock.norm.bias").c_str()),
                 m.w((p + ".resblock.conv.weight").c_str()),
-                m.w((p + ".resblock.conv.bias").c_str()));
+                m.w((p + ".resblock.conv.bias").c_str()),
+                act);
         }
         return build_encoder_block_s(ctx, sg, x,
             m.w((p + ".conv.weight").c_str()),
@@ -1315,7 +1338,7 @@ bool build_stream_graph(dvqe_graph_model& m, dvqe_stream_graph& sg) {
                 m.w((p + ".deconv.norm.bias").c_str()),
                 m.w((p + ".deconv.conv.weight").c_str()),
                 m.w((p + ".deconv.conv.bias").c_str()),
-                is_last);
+                is_last, act);
         }
         return build_decoder_block_s(ctx, sg, x, x_en,
             m.w((p + ".skip_conv.weight").c_str()),

@@ -24,8 +24,10 @@ struct localvqe_hparams {
     int kernel_size_w    = 3;  // overridden by GGUF; default matches legacy
     int bottleneck_hidden = 0;  // 0 = auto (C * F / 2)
     // 1 = post-conv BN folded into conv weights, ELU activation (legacy v1).
-    // 2 = pre-norm CausalGroupNorm + ReLU6 (v1.1 onward); norm tensors live
-    //     alongside conv weights in the GGUF and run at inference.
+    // 2 = pre-norm CausalGroupNorm + ReLU6 (v1.1); norm tensors live alongside
+    //     conv weights in the GGUF and run at inference.
+    // 3 = pre-norm CausalGroupNorm + SiLU (v1.2 onward); identical structure
+    //     to v=2, only the activation changes.
     int version          = 1;
     std::vector<int> mic_channels;
     std::vector<int> far_channels;
