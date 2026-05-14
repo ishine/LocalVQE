@@ -8,7 +8,7 @@ acoustic echo cancellation (AEC), noise suppression, and dereverberation of
 16 kHz speech, designed to run on commodity CPUs in real time.
 
 - 1.3 M parameters (~5 MB F32)
-- ~1.66 ms per 16 ms frame on Zen4 (24 threads) — **≈9.6× realtime**
+- ~1.56 ms per 16 ms frame on Zen4 (4 threads) — **≈10× realtime**
 - Causal, streaming: 256-sample hop, 16 ms algorithmic latency
 - F32 reference inference in C++ via [GGML](https://github.com/ggml-org/ggml);
   PyTorch reference included for verification and research
@@ -77,16 +77,13 @@ Pre-trained weights are published on Hugging Face at
 
 | File | Description |
 |---|---|
-| `localvqe-v1.1-1.3M-f32.gguf` | F32 GGUF — what the C++ engine loads. |
-| `localvqe-v1.1-1.3M.pt` | PyTorch checkpoint — for verification, ablation, and downstream research. |
-| `localvqe-v1-1.3M-f32.gguf` | Previous release. |
+| `localvqe-v1.2-1.3M-f32.gguf` | F32 GGUF — what the C++ engine loads. |
+| `localvqe-v1.2-1.3M.pt` | PyTorch checkpoint — for verification, ablation, and downstream research. |
+| `localvqe-v1.1-1.3M-f32.gguf` | Previous release. |
+| `localvqe-v1-1.3M-f32.gguf` | Original release. |
 
-The current release is **v1.1**, which fixes intermittent crackling
-the previous release produced under heavy background noise.
-
-Only F32 is published today. A `quantize` tool is included in the C++
-build (see below); calibrated Q4_K / Q8_0 weights are not yet
-released.
+The current release is **v1.2**. It doubles the supported delay window from 500ms to 1 second at a 20% 
+performance cost. It also avoids oversuppression of voices that are near to the noise floor.
 
 ## Streaming latency
 
@@ -94,6 +91,24 @@ Per-hop, 16 kHz / 256-sample hop → 16 ms budget. Each hop is a full
 `ggml_backend_graph_compute`. Run any of these locally with the
 `bench-run` cmake target — see [Benchmark](#benchmark) below. 30
 iters × 625 hops/iter = 18 750 hops per row.
+
+### v1.2 (current — 1024 ms echo-search window)
+
+| Hardware                              | Backend | Threads | Hop p50  | Hop p99  | Hop max    | RT factor |
+|---------------------------------------|---------|--------:|---------:|---------:|-----------:|----------:|
+| Ryzen 9 7900 (Zen4 desktop)           | CPU     |       1 |  4.15 ms |  4.53 ms |  6.23 ms   |     3.83× |
+| Ryzen 9 7900 (Zen4 desktop)           | CPU     |       4 |  1.56 ms |  1.73 ms |  4.57 ms   |    10.16× |
+| Ryzen 9 7900 (Zen4 desktop)           | CPU     |       8 |  1.89 ms |  2.15 ms |  6.91 ms ‡ |     8.58× |
+| Ryzen 9 7900 (Zen4 desktop)           | CPU     |      16 |  2.12 ms |  2.17 ms |  6.43 ms ‡ |     7.54× |
+| Ryzen 9 7900 + RADV iGPU (Raphael)    | Vulkan  |       — |  4.88 ms |  5.06 ms |  6.24 ms   |     3.28× |
+| Ryzen 9 7900 + RTX 5070 Ti (dGPU)     | Vulkan  |       — |  1.79 ms |  3.42 ms |  5.42 ms   |     8.58× |
+
+The wider echo-search window costs ~20–25 % per-hop on CPU vs v1.1.
+Re-runs of v1.2 on Apple M4 and Alder Lake aren't published yet —
+the v1.1 rows below remain representative shape-wise, expect the
+same multiplier.
+
+### v1.1 (previous — 512 ms echo-search window)
 
 | Hardware                              | Backend | Threads | Hop p50  | Hop p99  | Hop max    | RT factor |
 |---------------------------------------|---------|--------:|---------:|---------:|-----------:|----------:|
@@ -114,14 +129,10 @@ iters × 625 hops/iter = 18 750 hops per row.
 
 Adding cores hits diminishing returns quickly: the model is small
 enough that thread-launch and synchronisation overhead start to
-dominate beyond ≈4 threads on these CPUs. The Alder Lake sweep
-shows it plainly — the 1→2 thread step gives a 1.27× speedup, but
-3→4 only adds 1.10×. For deployment, two to four threads is
-usually the sweet spot.
-
-Zen4 rows are measured on the v1.1 model. Apple M4 and Alder Lake
-rows were measured on the previous release; CPU latency is unchanged
-to within measurement noise so they remain representative.
+dominate beyond ≈4 threads on these CPUs. The Zen4 v1.2 sweep
+shows it plainly — the 1→4 thread step gives a 2.66× speedup, but
+4→8 is a regression and 8→16 worse still. For deployment, **four
+threads is the sweet spot on Zen4**.
 
 ‡ Outliers are single hops early in the first iteration (cold
 caches); p99 is representative of steady-state.
@@ -146,11 +157,17 @@ Full 800-clip eval on the
 
 | Scenario                          |   n | AECMOS echo ↑ | AECMOS deg ↑ | blind ERLE ↑ | DNSMOS OVRL ↑ |
 |-----------------------------------|----:|--------------:|-------------:|-------------:|--------------:|
-| doubletalk                        | 115 |          4.70 |         2.35 |       8.4 dB |          2.85 |
-| doubletalk-with-movement          | 185 |          4.63 |         2.35 |       8.3 dB |          2.80 |
-| farend-singletalk                 | 107 |          2.98 |         4.91 |      44.7 dB |          1.93 |
-| farend-singletalk-with-movement   | 193 |          3.40 |         4.95 |      45.0 dB |          1.91 |
-| nearend-singletalk                | 200 |          4.99 |         4.05 |       2.5 dB |          3.13 |
+| doubletalk                        | 115 |          4.72 |         2.37 |       8.4 dB |          2.83 |
+| doubletalk-with-movement          | 185 |          4.65 |         2.30 |       8.1 dB |          2.79 |
+| farend-singletalk                 | 107 |          3.78 |         4.91 |      45.7 dB |          1.80 |
+| farend-singletalk-with-movement   | 193 |          4.12 |         4.96 |      40.6 dB |          1.75 |
+| nearend-singletalk                | 200 |          5.00 |         4.16 |       2.1 dB |          3.17 |
+
+v1.2 vs v1.1 deltas: echo MOS +0.80 / +0.72 on FE-ST and FE-ST-with-
+movement (the main release goal), near-end deg MOS +0.11, DT echo
+MOS roughly unchanged. FE-ST-with-movement ERLE drops 4.4 dB —
+the v1.2 model is less aggressive when the echo path is moving,
+which trades raw cancellation for fewer near-end gating artefacts.
 
 - **AECMOS** (Purin et al., ICASSP 2022) is Microsoft's non-intrusive AEC
   quality predictor. "Echo" rates how well echo was removed; "degradation"
@@ -162,7 +179,7 @@ Full 800-clip eval on the
 
 PyTorch checkpoint integrity (SHA256):
 
-    76aabaa3bca3a9d7989463226312aa2344f978403c3e0e007e58a15922c97707  localvqe-v1.1-1.3M.pt
+    ff6885e7c8d7d29a8ce963303dcd668ae0f2a7bdafae28631292fe6f06f7cd77  localvqe-v1.2-1.3M.pt
 
 ## Repository Layout
 
@@ -220,7 +237,7 @@ glslc`/`shaderc`).
 ### CLI
 
 ```bash
-./ggml/build/bin/localvqe localvqe-v1.1-1.3M-f32.gguf \
+./ggml/build/bin/localvqe localvqe-v1.2-1.3M-f32.gguf \
     --in-wav mic.wav ref.wav \
     --out-wav enhanced.wav
 ```
@@ -270,7 +287,7 @@ done
 Or invoke the binary directly against your own WAV pair:
 
 ```bash
-./ggml/build/bin/bench localvqe-v1.1-1.3M-f32.gguf \
+./ggml/build/bin/bench localvqe-v1.2-1.3M-f32.gguf \
     --backend Vulkan --device 0 \
     --in-wav mic.wav ref.wav --iters 10 --profile
 ```
@@ -306,7 +323,7 @@ To refresh a reference output after an intentional graph change:
 
 ```bash
 python ggml/tests/regenerate_fixtures.py \
-    --gguf ggml/build/bench_assets/localvqe-v1.1-1.3M-f32.gguf
+    --gguf ggml/build/bench_assets/localvqe-v1.2-1.3M-f32.gguf
 ```
 
 ### Quantizing (experimental)
@@ -316,7 +333,7 @@ tool in the C++ build can produce GGUF variants from the F32 reference
 for experimentation:
 
 ```bash
-./ggml/build/bin/quantize localvqe-v1.1-1.3M-f32.gguf localvqe-v1.1-1.3M-q8.gguf Q8_0
+./ggml/build/bin/quantize localvqe-v1.2-1.3M-f32.gguf localvqe-v1.2-1.3M-q8.gguf Q8_0
 ```
 
 Expect end-to-end quality loss until proper per-tensor selection and

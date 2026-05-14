@@ -138,6 +138,7 @@ set(_assets_dir ${CMAKE_BINARY_DIR}/bench_assets)
 set(_dl_script  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/download_asset.cmake)
 set(_gguf_v1    ${_assets_dir}/localvqe-v1-1.3M-f32.gguf)
 set(_gguf_v11   ${_assets_dir}/localvqe-v1.1-1.3M-f32.gguf)
+set(_gguf_v12   ${_assets_dir}/localvqe-v1.2-1.3M-f32.gguf)
 file(MAKE_DIRECTORY ${_assets_dir})
 
 function(_dvqe_download OUTFILE URL SHA COMMENT_TEXT)
@@ -159,6 +160,10 @@ _dvqe_download(${_gguf_v11}
     https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1.1-1.3M-f32.gguf
     c118227c6b433d6aa36d9e4b993e0f31aa60787ea38d301d04db917a4a2b0a84
     "Fetching LocalVQE v1.1 F32 model from HuggingFace")
+_dvqe_download(${_gguf_v12}
+    https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1.2-1.3M-f32.gguf
+    4856ecf5f522b23fb2bc5caeac81f323c0ef1c4c156a9c7d40a6adbe092ba9ce
+    "Fetching LocalVQE v1.2 F32 model from HuggingFace")
 
 # Benchmark (uses C API + WAV I/O)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp" AND SNDFILE_FOUND)
@@ -181,7 +186,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp" AND SNDFILE_FOUND)
         "Fetching doubletalk reference WAV")
 
     add_custom_target(bench-assets
-        DEPENDS ${_gguf_v1} ${_bench_mic} ${_bench_ref})
+        DEPENDS ${_gguf_v12} ${_bench_mic} ${_bench_ref})
 
     set(BENCH_ITERS 10 CACHE STRING "Iterations for the bench-run target")
     set(BENCH_BACKEND "CPU"
@@ -190,7 +195,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench.cpp" AND SNDFILE_FOUND)
         CACHE STRING "Device index for bench-run (per-backend, see bench-list-devices)")
     add_custom_target(bench-run
         COMMAND $<TARGET_FILE:bench>
-            ${_gguf_v1}
+            ${_gguf_v12}
             --backend ${BENCH_BACKEND}
             --device  ${BENCH_DEVICE}
             --in-wav ${_bench_mic} ${_bench_ref}
@@ -237,12 +242,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_regression.cpp")
     add_executable(test_regression tests/test_regression.cpp localvqe_api.cpp)
     target_link_libraries(test_regression PRIVATE dvqe_graph)
 
-    add_custom_target(regression-assets DEPENDS ${_gguf_v1} ${_gguf_v11})
+    add_custom_target(regression-assets DEPENDS ${_gguf_v1} ${_gguf_v11} ${_gguf_v12})
 
     set(_reg_fix    ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures)
     set(_reg_input  ${_reg_fix}/regression_input.f32)
 
-    foreach(_v "v1" "v1.1")
+    foreach(_v "v1" "v1.1" "v1.2")
         set(_reg_gguf localvqe-${_v}-1.3M-f32.gguf)
         set(_reg_out  ${_reg_fix}/localvqe-${_v}-1.3M-f32.out.f32)
         add_test(NAME regression_${_v}_f32
