@@ -9,8 +9,10 @@ from einops import rearrange
 # ggml/localvqe_model.h):
 #   1 = post-conv BatchNorm2d + ELU (legacy v1).
 #   2 = pre-norm CausalGroupNorm + ReLU6 with skip_norm on the decoder
-#       skip path and an internal norm in SubpixelConv2d (v1.1 onward,
-#       matches localvqe-v1.1-1.3M.pt published on Hugging Face).
+#       skip path and an internal norm in SubpixelConv2d (v1.1, matches
+#       localvqe-v1.1-1.3M.pt).
+#   3 = identical to v2 structurally, SiLU activation in place of ReLU6
+#       (v1.2 onward, matches localvqe-v1.2-1.3M.pt).
 
 
 def causal_pad(kernel_size):
@@ -72,9 +74,18 @@ class FE(nn.Module):
         return x_c.permute(0, 3, 2, 1).contiguous()
 
 
+def _v2_activation(arch_version: int) -> nn.Module:
+    """ReLU6 for arch_version=2 (v1.1), SiLU for arch_version=3 (v1.2)."""
+    if arch_version == 2:
+        return nn.ReLU6()
+    if arch_version == 3:
+        return nn.SiLU()
+    raise ValueError(f"Unsupported arch_version={arch_version}")
+
+
 class ResidualBlock(nn.Module):
     """v1: pad → conv → BN → ELU + skip.
-    v2: norm → pad → conv → ReLU6 + skip (pre-norm)."""
+    v2/v3: norm → pad → conv → act + skip (pre-norm; act=ReLU6 for v2, SiLU for v3)."""
 
     def __init__(self, channels, kernel_size=(4, 3), arch_version=2):
         super().__init__()
@@ -84,11 +95,9 @@ class ResidualBlock(nn.Module):
         if arch_version == 1:
             self.bn = nn.BatchNorm2d(channels)
             self.elu = nn.ELU()
-        elif arch_version == 2:
-            self.norm = CausalGroupNorm(channels)
-            self.act = nn.ReLU6()
         else:
-            raise ValueError(f"Unsupported arch_version={arch_version}")
+            self.norm = CausalGroupNorm(channels)
+            self.act = _v2_activation(arch_version)
 
     def forward(self, x):
         if self.arch_version == 1:
@@ -98,7 +107,7 @@ class ResidualBlock(nn.Module):
 
 class EncoderBlock(nn.Module):
     """v1: pad → conv (stride=(1,2)) → BN → ELU → ResidualBlock.
-    v2: norm → pad → conv (stride=(1,2)) → ReLU6 → ResidualBlock."""
+    v2/v3: norm → pad → conv (stride=(1,2)) → act → ResidualBlock."""
 
     def __init__(self, in_channels, out_channels, kernel_size=(4, 3), stride=(1, 2),
                  arch_version=2):
@@ -109,11 +118,9 @@ class EncoderBlock(nn.Module):
         if arch_version == 1:
             self.bn = nn.BatchNorm2d(out_channels)
             self.elu = nn.ELU()
-        elif arch_version == 2:
-            self.norm = CausalGroupNorm(in_channels)
-            self.act = nn.ReLU6()
         else:
-            raise ValueError(f"Unsupported arch_version={arch_version}")
+            self.norm = CausalGroupNorm(in_channels)
+            self.act = _v2_activation(arch_version)
         self.resblock = ResidualBlock(out_channels, kernel_size=kernel_size,
                                       arch_version=arch_version)
 
@@ -215,12 +222,12 @@ class S4DBottleneck(nn.Module):
 
 class SubpixelConv2d(nn.Module):
     """v1: pad → conv → reshape (×2 freq).
-    v2: norm → pad → conv → reshape (×2 freq) (pre-norm)."""
+    v2/v3: norm → pad → conv → reshape (×2 freq) (pre-norm)."""
 
     def __init__(self, in_channels, out_channels, kernel_size=(4, 3), arch_version=2):
         super().__init__()
         self.arch_version = arch_version
-        if arch_version == 2:
+        if arch_version in (2, 3):
             self.norm = CausalGroupNorm(in_channels)
         elif arch_version != 1:
             raise ValueError(f"Unsupported arch_version={arch_version}")
@@ -228,7 +235,7 @@ class SubpixelConv2d(nn.Module):
         self.conv = nn.Conv2d(in_channels, out_channels * 2, kernel_size)
 
     def forward(self, x):
-        if self.arch_version == 2:
+        if self.arch_version in (2, 3):
             x = self.norm(x)
         y = self.conv(self.pad(x))
         y = rearrange(y, "b (r c) t f -> b c t (r f)", r=2)
@@ -237,7 +244,8 @@ class SubpixelConv2d(nn.Module):
 
 class DecoderBlock(nn.Module):
     """v1: skip_conv(x_en) + x → resblock → deconv → BN+ELU (if not last).
-    v2: skip_norm → skip_conv → +x → resblock → deconv → ReLU6 (if not last)."""
+    v2/v3: skip_norm → skip_conv → +x → resblock → deconv → act (if not last).
+    Act is ReLU6 for v2 and SiLU for v3."""
 
     def __init__(self, in_channels, out_channels, kernel_size=(4, 3), is_last=False,
                  enc_channels=None, arch_version=2):
@@ -245,7 +253,7 @@ class DecoderBlock(nn.Module):
         self.arch_version = arch_version
         if enc_channels is None:
             enc_channels = in_channels
-        if arch_version == 2:
+        if arch_version in (2, 3):
             self.skip_norm = CausalGroupNorm(enc_channels)
         elif arch_version != 1:
             raise ValueError(f"Unsupported arch_version={arch_version}")
@@ -260,10 +268,10 @@ class DecoderBlock(nn.Module):
                 self.bn = nn.BatchNorm2d(out_channels)
                 self.elu = nn.ELU()
             else:
-                self.act = nn.ReLU6()
+                self.act = _v2_activation(arch_version)
 
     def forward(self, x, x_en):
-        if self.arch_version == 2:
+        if self.arch_version in (2, 3):
             x_en = self.skip_norm(x_en)
         y = x + self.skip_conv(x_en)
         y = self.deconv(self.resblock(y))

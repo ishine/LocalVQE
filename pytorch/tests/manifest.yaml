@@ -10,11 +10,21 @@
 # pytorch/checkpoints/) and skip cleanly when the file is absent.
 
 checkpoints:
+  - name: localvqe-v1.2-1.3M
+    filename: localvqe-v1.2-1.3M.pt
+    url: https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1.2-1.3M.pt
+    sha256: ff6885e7c8d7d29a8ce963303dcd668ae0f2a7bdafae28631292fe6f06f7cd77
+    arch_version: 3
+    dmax: 64
+    state_dict_key: model_state_dict
+    fold_temperature: true
+    reference_output: localvqe-v1.2-1.3M.out.pt
   - name: localvqe-v1.1-1.3M
     filename: localvqe-v1.1-1.3M.pt
     url: https://huggingface.co/LocalAI-io/LocalVQE/resolve/main/localvqe-v1.1-1.3M.pt
     sha256: 76aabaa3bca3a9d7989463226312aa2344f978403c3e0e007e58a15922c97707
     arch_version: 2
+    dmax: 32
     state_dict_key: model_state_dict
     fold_temperature: true
     reference_output: localvqe-v1.1-1.3M.out.pt

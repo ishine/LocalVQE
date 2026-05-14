@@ -73,6 +73,13 @@ def test_checkpoint_loads_and_matches_reference(
 
     cfg = yaml.safe_load((pytorch_dir / "configs" / "default.yaml").read_text())
     model_kwargs = dict(cfg["model"])
+    # Manifest entries override defaults so each checkpoint pins the
+    # geometry it was trained with (dmax in particular changed between
+    # v1.1 → v1.2). Apply any keys the manifest lists that overlap with
+    # the model config.
+    for k, v in checkpoint_entry.items():
+        if k in model_kwargs:
+            model_kwargs[k] = v
     model_kwargs["arch_version"] = checkpoint_entry["arch_version"]
     model = LocalVQE(**model_kwargs, n_freqs=cfg["audio"]["n_freqs"]).eval()
 

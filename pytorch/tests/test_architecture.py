@@ -45,6 +45,9 @@ EXPECTED_KEYS = {
         "dec1.skip_norm.bias",
     },
 }
+# v3 shares v2's state_dict layout (only the activation differs, and
+# nn.SiLU has no learnable parameters).
+EXPECTED_KEYS[3] = EXPECTED_KEYS[2]
 
 # Keys that MUST NOT exist for a given arch_version (catches accidental
 # cross-arch leakage).
@@ -52,9 +55,10 @@ FORBIDDEN_KEY_FRAGMENTS = {
     1: (".norm.", ".skip_norm."),
     2: (".bn.", ".running_mean", ".running_var"),
 }
+FORBIDDEN_KEY_FRAGMENTS[3] = FORBIDDEN_KEY_FRAGMENTS[2]
 
 
-@pytest.mark.parametrize("arch_version", [1, 2])
+@pytest.mark.parametrize("arch_version", [1, 2, 3])
 def test_state_dict_keys(arch_version, pytorch_dir):
     cfg = _load_default_cfg(pytorch_dir)
     model_kwargs = dict(cfg["model"])
@@ -70,7 +74,7 @@ def test_state_dict_keys(arch_version, pytorch_dir):
     assert not leaked, f"arch_version={arch_version} leaked cross-arch keys: {leaked[:5]}"
 
 
-@pytest.mark.parametrize("arch_version", [1, 2])
+@pytest.mark.parametrize("arch_version", [1, 2, 3])
 def test_strict_round_trip(arch_version, pytorch_dir):
     """Save random weights, reload with strict=True. Catches any
     parameter that's registered in __init__ but never visited."""
