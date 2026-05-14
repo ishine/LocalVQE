@@ -25,3 +25,6 @@ __pycache__/
 .direnv/
 .claude/
 .cache/
+
+# Local benchmark / scratch output
+bench_results/
