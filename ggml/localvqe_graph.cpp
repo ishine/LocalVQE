@@ -7,6 +7,7 @@
 
 #include "localvqe_graph.h"
 #include "gguf.h"
+#include "model_hash.h"
 
 #ifdef GGML_USE_CUDA
 #include "ggml-cuda.h"
@@ -535,6 +536,12 @@ bool load_graph_model(const char* path, dvqe_graph_model& model,
 bool load_graph_model_ex(const char* path, dvqe_graph_model& model,
                          const char* backend_name, int device_index,
                          bool verbose, int n_threads) {
+    // Refuse any GGUF that isn't on the released-models allowlist. The
+    // GGUF parser below is not hardened against malicious inputs (the
+    // vendored ggml calls ggml_abort on bad metadata), so we treat the
+    // hash check as the integrity boundary. See model_hash.cpp.
+    if (!localvqe::verify_model_hash(path)) return false;
+
     // Load GGUF metadata only — we'll allocate tensors on the backend buffer
     struct gguf_init_params params;
     params.no_alloc = true;
@@ -1437,11 +1444,21 @@ void process_frame_graph(dvqe_stream_graph& sg, dvqe_graph_model& m,
     ggml_backend_tensor_get(sg.enhanced_pcm_out, enhanced_pcm_window, 0, K * sizeof(float));
 
     // Update histories: copy each output back to corresponding input.
-    // ggml_backend_tensor_copy is a direct memcpy when both buffers are on
-    // the same host backend (CPU), halving memory traffic vs get+set via
-    // scratch. For CUDA it's a device-to-device copy on the backend.
-    auto copy_hist = [](struct ggml_tensor* in, struct ggml_tensor* out) {
-        if (in && out) ggml_backend_tensor_copy(out, in);
+    // ggml_gallocr places persistent in/out tensors at overlapping offsets
+    // inside its reuse pool; ggml_backend_tensor_copy reduces to memcpy on
+    // host backends, which is UB on overlap. Use memmove directly on host
+    // buffers (single copy, overlap-safe); fall back to scratch for
+    // non-host backends where ->data isn't dereferenceable.
+    auto copy_hist = [&](struct ggml_tensor* in, struct ggml_tensor* out) {
+        if (!in || !out) return;
+        size_t n = ggml_nbytes(out);
+        if (ggml_backend_buffer_is_host(in->buffer) &&
+            ggml_backend_buffer_is_host(out->buffer)) {
+            std::memmove(in->data, out->data, n);
+        } else {
+            ggml_backend_tensor_get(out, sg.hist_scratch.data(), 0, n);
+            ggml_backend_tensor_set(in,  sg.hist_scratch.data(), 0, n);
+        }
     };
 
     for (size_t i = 0; i < sg.conv_hist_in.size(); i++)

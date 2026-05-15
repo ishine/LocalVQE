@@ -27,6 +27,7 @@
  */
 
 #include "localvqe_api.h"
+#include "test_helpers.h"
 
 #include <cmath>
 #include <cstdio>
@@ -34,15 +35,11 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#include <sys/stat.h>
 
-static constexpr int SKIP_EXIT = 77;
+using localvqe_test::file_exists;
+using localvqe_test::resolve_gguf;
+static constexpr int SKIP_EXIT = localvqe_test::kSkipExit;
 static constexpr int N_SAMPLES = 16000;
-
-static bool file_exists(const std::string& p) {
-    struct stat st;
-    return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
-}
 
 static bool read_f32(const std::string& path, std::vector<float>& out, size_t expected_count) {
     FILE* f = std::fopen(path.c_str(), "rb");
@@ -68,28 +65,6 @@ static bool write_f32(const std::string& path, const std::vector<float>& data) {
     size_t wrote = std::fwrite(data.data(), sizeof(float), data.size(), f);
     std::fclose(f);
     return wrote == data.size();
-}
-
-static std::string resolve_gguf(const std::string& explicit_path, const std::string& fname) {
-    if (!explicit_path.empty()) return explicit_path;
-    if (const char* env = std::getenv("LOCALVQE_GGUF_DIR")) {
-        std::string p = std::string(env) + "/" + fname;
-        if (file_exists(p)) return p;
-    }
-    // Common fallback: bench-assets dir relative to the build tree.
-    // The test binary lives in <build>/bin/, so check ../bench_assets/.
-    // We can't easily get our own argv[0] here without extra plumbing,
-    // so just check a few likely relative paths.
-    const char* candidates[] = {
-        "bench_assets",
-        "../bench_assets",
-        "../../bench_assets",
-    };
-    for (const char* c : candidates) {
-        std::string p = std::string(c) + "/" + fname;
-        if (file_exists(p)) return p;
-    }
-    return "";
 }
 
 int main(int argc, char** argv) {

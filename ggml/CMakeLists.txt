@@ -9,6 +9,13 @@ option(LOCALVQE_BUILD_SHARED "Build shared library with C API" OFF)
 option(LOCALVQE_CUDA "Enable GGML CUDA backend" OFF)
 option(LOCALVQE_VULKAN "Enable GGML Vulkan backend" OFF)
 
+# libFuzzer-based fuzz targets for the C API. Requires clang. Implies
+# -fsanitize=fuzzer,address,undefined unless overridden via
+# LOCALVQE_FUZZ_SANITIZERS (e.g. "fuzzer,address" to drop UBSan).
+option(LOCALVQE_FUZZ "Build libFuzzer harnesses (clang only)" OFF)
+set(LOCALVQE_FUZZ_SANITIZERS "fuzzer,address,undefined"
+    CACHE STRING "Sanitizer/fuzzer instrumentation for LOCALVQE_FUZZ targets")
+
 # Need PIC for everything when building shared lib (ggml static lib gets linked in)
 if(LOCALVQE_BUILD_SHARED)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -76,7 +83,7 @@ add_library(dvqe_model STATIC localvqe_model.cpp)
 target_link_libraries(dvqe_model PUBLIC dvqe_common)
 
 # GGML graph model (streaming + batch inference)
-add_library(dvqe_graph STATIC localvqe_graph.cpp)
+add_library(dvqe_graph STATIC localvqe_graph.cpp model_hash.cpp)
 target_link_libraries(dvqe_graph PUBLIC dvqe_common)
 
 # Main inference binary (CLI). Needs WAV I/O.
@@ -259,4 +266,52 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_regression.cpp")
             SKIP_RETURN_CODE 77
             ENVIRONMENT "LOCALVQE_GGUF_DIR=${_assets_dir}")
     endforeach()
+endif()
+
+# Fuzz reproducer regression tests. Pin specific bugs found by the
+# libFuzzer harnesses so they don't silently regress.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_fuzz_repros.cpp")
+    enable_testing()
+    add_executable(test_fuzz_repros tests/test_fuzz_repros.cpp localvqe_api.cpp)
+    target_link_libraries(test_fuzz_repros PRIVATE dvqe_graph)
+
+    # Bug: process_frame_graph memcpy overlap. Exercises the streaming
+    # graph for one frame; meaningful in any build, definitive under ASan.
+    add_test(NAME fuzz_repro_frame_roundtrip
+             COMMAND test_fuzz_repros frame-roundtrip
+                 --gguf-name localvqe-v1.2-1.3M-f32.gguf)
+    set_tests_properties(fuzz_repro_frame_roundtrip PROPERTIES
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "LOCALVQE_GGUF_DIR=${_assets_dir}")
+
+    # SHA-256 allowlist: non-released GGUFs must be rejected before
+    # reaching the (unhardened) GGUF parser. No assets / env needed.
+    add_test(NAME fuzz_repro_reject_unhashed
+             COMMAND test_fuzz_repros reject-unhashed)
+endif()
+
+# ── libFuzzer harnesses ──────────────────────────────────────────────────────
+#
+# Two targets:
+#   fuzz_audio       — drives the audio-processing API with a real model loaded
+#   fuzz_model_load  — feeds attacker-controlled bytes to the GGUF loader
+#
+# Both link statically against dvqe_graph and are instrumented with libFuzzer
+# + sanitizers. See ggml/fuzz/README.md for the run recipe.
+if(LOCALVQE_FUZZ)
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        message(FATAL_ERROR
+            "LOCALVQE_FUZZ requires clang (got ${CMAKE_CXX_COMPILER_ID}). "
+            "Configure with -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++.")
+    endif()
+
+    set(_fuzz_flags "-fsanitize=${LOCALVQE_FUZZ_SANITIZERS}")
+    # Coverage instrumentation must reach the libraries the harness calls
+    # into, not just the harness TU. We apply the flag to the whole build
+    # tree by injecting it into CMAKE_*_FLAGS for this directory.
+    add_compile_options(${_fuzz_flags} -fno-omit-frame-pointer -g)
+    add_link_options(${_fuzz_flags})
+
+    add_executable(fuzz_audio fuzz/fuzz_audio.cpp localvqe_api.cpp)
+    target_link_libraries(fuzz_audio PRIVATE dvqe_graph)
 endif()

@@ -9,17 +9,33 @@
       pkgs = import nixpkgs { inherit system; };
     in
     {
-      devShells.${system}.default = pkgs.mkShell {
-        packages = [
-          pkgs.cmake
-          pkgs.gcc
-          pkgs.pkg-config
-          pkgs.libsndfile
-          # Optional: used when building with -DLOCALVQE_VULKAN=ON
-          pkgs.vulkan-loader
-          pkgs.vulkan-headers
-          pkgs.shaderc
-        ];
+      devShells.${system} = {
+        default = pkgs.mkShell {
+          packages = [
+            pkgs.cmake
+            pkgs.gcc
+            pkgs.pkg-config
+            pkgs.libsndfile
+            # Optional: used when building with -DLOCALVQE_VULKAN=ON
+            pkgs.vulkan-loader
+            pkgs.vulkan-headers
+            pkgs.shaderc
+          ];
+        };
+
+        # Fuzzing shell: clang with libFuzzer + ASan/UBSan. Use with
+        #   nix develop .#fuzz
+        # then configure with -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+        # -DLOCALVQE_FUZZ=ON. See ggml/fuzz/README.md for the full recipe.
+        fuzz = pkgs.mkShell {
+          packages = [
+            pkgs.cmake
+            pkgs.clang
+            pkgs.llvm
+            pkgs.pkg-config
+            pkgs.libsndfile
+          ];
+        };
       };
     };
 }
